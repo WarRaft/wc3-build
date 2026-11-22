@@ -1,0 +1,14 @@
+[package]
+name = "wc3-build"
+version = "0.1.0"
+edition = "2024"
+description = "Builds a Warcraft III map's script: one model of the code (the IR) from every source, and the game's JASS (later AngelScript and Lua) from it"
+license = "CC0-1.0"
+
+[lib]
+name = "wc3_build"
+path = "src/lib.rs"
+
+[dependencies]
+jass-rs = { path = "../jass-rs" }
+parser-rs = { path = "../parser-rs" }

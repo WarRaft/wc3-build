@@ -1,0 +1,12 @@
+//! Builds a Warcraft III map's script: every source into one model of the
+//! code ([`ir`]), the game's JASS made of it ([`jass`]). See the README.
+
+pub mod from_jass;
+pub mod ir;
+pub mod jass;
+
+/// The game's JASS of `files` (this toolchain's JASS, or the game's), in
+/// their order: see [`jass`].
+pub fn jass_of(files: &[from_jass::Source]) -> Result<String, Vec<ir::Error>> {
+    jass::build(&from_jass::module(files)?)
+}
