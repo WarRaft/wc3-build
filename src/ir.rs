@@ -212,3 +212,120 @@ pub fn called(body: &[Stmt]) -> Vec<String> {
 pub fn called_in(e: &Expr) -> Vec<String> {
     called(&[Stmt::Return { value: Some(e.clone()), line: 0 }])
 }
+
+// ------------------------------------------------------- making nodes
+//
+// For a source that isn't text (the map's data): its statements and
+// values made as they are. A number is written as it's meant to read.
+
+impl Expr {
+    /// A literal, as written (`'hfoo'`, `true`, `null`).
+    pub fn lit(text: impl Into<String>) -> Expr {
+        Expr::Literal(text.into())
+    }
+
+    pub fn int(v: impl std::fmt::Display) -> Expr {
+        Expr::Literal(v.to_string())
+    }
+
+    /// A real with `decimals` decimals (World Editor's: one for a
+    /// coordinate, three for a fraction).
+    pub fn real(v: f32, decimals: usize) -> Expr {
+        let text = format!("{v:.decimals$}");
+        // A sign is an operator in JASS.
+        match text.strip_prefix('-') {
+            Some(rest) => Expr::Unary(UnaryOp::Neg, Box::new(Expr::Literal(rest.to_string()))),
+            None => Expr::Literal(text),
+        }
+    }
+
+    pub fn bool(v: bool) -> Expr {
+        Expr::Literal(v.to_string())
+    }
+
+    /// A string, as JASS writes it.
+    pub fn string(s: &str) -> Expr {
+        let mut out = String::from("\"");
+        for c in s.chars() {
+            match c {
+                '"' => out += "\\\"",
+                '\\' => out += "\\\\",
+                '\n' => out += "\\n",
+                '\r' => out += "\\r",
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        Expr::Literal(out)
+    }
+
+    /// An object's id in single quotes (`'hfoo'`).
+    pub fn rawcode(id: &str) -> Expr {
+        Expr::Literal(format!("'{id}'"))
+    }
+
+    pub fn var(name: impl Into<String>) -> Expr {
+        Expr::Var(name.into())
+    }
+
+    pub fn call(name: impl Into<String>, args: Vec<Expr>) -> Expr {
+        Expr::Call(Call { name: name.into(), args })
+    }
+
+    pub fn code(name: impl Into<String>) -> Expr {
+        Expr::Code(name.into())
+    }
+
+    pub fn binary(a: Expr, op: BinOp, b: Expr) -> Expr {
+        Expr::Binary(Box::new(a), op, Box::new(b))
+    }
+}
+
+impl Stmt {
+    pub fn call(name: impl Into<String>, args: Vec<Expr>) -> Stmt {
+        Stmt::Call { call: Call { name: name.into(), args }, line: 0 }
+    }
+
+    pub fn set(name: impl Into<String>, value: Expr) -> Stmt {
+        Stmt::Set { name: name.into(), index: None, value, line: 0 }
+    }
+
+    pub fn set_at(name: impl Into<String>, index: Expr, value: Expr) -> Stmt {
+        Stmt::Set { name: name.into(), index: Some(index), value, line: 0 }
+    }
+
+    pub fn local(ty: impl Into<String>, name: impl Into<String>, init: Option<Expr>) -> Stmt {
+        Stmt::Local { ty: ty.into(), name: name.into(), array: false, init, line: 0 }
+    }
+}
+
+impl Function {
+    /// A function taking and returning nothing, made where `origin` says.
+    pub fn new(name: impl Into<String>, body: Vec<Stmt>, origin: Origin) -> Function {
+        Function { sig: Signature { name: name.into(), params: Vec::new(), returns: None, constant: false }, body, origin }
+    }
+}
+
+impl Global {
+    /// A variable, of `ty`, set to `init` where the game reads globals.
+    pub fn new(name: impl Into<String>, ty: impl Into<String>, init: Option<Expr>, origin: Origin) -> Global {
+        Global { name: name.into(), ty: ty.into(), array: false, constant: false, init, origin }
+    }
+}
+
+impl Origin {
+    /// What a build made of a file: the file, no line.
+    pub fn file(name: impl Into<String>) -> Origin {
+        Origin { file: name.into(), line: 0 }
+    }
+}
+
+impl Module {
+    /// Adds `other`'s items after this one's.
+    pub fn append(&mut self, other: Module) {
+        self.types.extend(other.types);
+        self.natives.extend(other.natives);
+        self.globals.extend(other.globals);
+        self.functions.extend(other.functions);
+    }
+}

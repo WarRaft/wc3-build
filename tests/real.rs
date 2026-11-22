@@ -49,6 +49,18 @@ fn real_scripts() {
         let after = problems(&built, &env);
         println!("{}: {} lines built, {} problems as it was", p.display(), built.lines().count(), before.len());
         assert_eq!(after, before, "{}", p.display());
+        // Shorter names: the same problems, by rule (names in them differ).
+        let module = wc3_build::from_jass::module(&[Source { name: &p.to_string_lossy(), text: &src }]).unwrap();
+        let short = wc3_build::jass::build_with(&module, &wc3_build::jass::Options { uglify: true }).unwrap();
+        let rules = |text: &str| {
+            let program = jass_rs::parse(text).unwrap_or_else(|e| panic!("line {}: {}", e.line, e.message));
+            let mut r: Vec<&'static str> = jass_rs::names::check(&program, &[&env]).into_iter().map(|d| d.rule).collect();
+            r.extend(jass_rs::lint(&program).into_iter().map(|d| d.rule));
+            r.sort();
+            r
+        };
+        assert_eq!(rules(&short.script), rules(&built), "{} with shorter names", p.display());
+        println!("    shorter names: {} bytes of {} ({}%){}", short.script.len(), built.len(), short.script.len() * 100 / built.len(), if short.notes.is_empty() { String::new() } else { format!("; {:?}", short.notes) });
     }
 }
 

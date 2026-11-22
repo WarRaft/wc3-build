@@ -30,8 +30,29 @@ use crate::ir::*;
 /// The prefix of every name the build makes.
 pub const PREFIX: &str = "wcb__";
 
+/// How a build makes its JASS.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Options {
+    /// Shorter names ([`crate::uglify`]): everything the game doesn't need
+    /// as it is renamed `a`, `b` ...
+    pub uglify: bool,
+}
+
+/// What a build made: the script, and what it says about it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Built {
+    pub script: String,
+    /// Why some names weren't shortened, when they were asked to be.
+    pub notes: Vec<String>,
+}
+
 /// The game's JASS of `m`, or why it can't be made.
 pub fn build(m: &Module) -> Result<String, Vec<Error>> {
+    build_with(m, &Options::default()).map(|b| b.script)
+}
+
+/// [`build`], as `options` say.
+pub fn build_with(m: &Module, options: &Options) -> Result<Built, Vec<Error>> {
     let mut m = m.clone();
     let mut errors = Vec::new();
     merge_entries(&mut m);
@@ -50,7 +71,11 @@ pub fn build(m: &Module) -> Result<String, Vec<Error>> {
     let (functions, globals) = evaluate_forward_calls(functions);
     m.globals.extend(globals);
     m.functions = functions.into_iter().map(hoist_locals).collect();
-    Ok(print(&m))
+    let mut notes = Vec::new();
+    if options.uglify {
+        notes = crate::uglify::uglify(&mut m).kept;
+    }
+    Ok(Built { script: print(&m), notes })
 }
 
 /// Is `f` a `main` or a `config` the build merges?

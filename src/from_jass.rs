@@ -26,6 +26,22 @@ pub fn module(files: &[Source]) -> Result<Module, Vec<Error>> {
     if errors.is_empty() { Ok(m) } else { Err(errors) }
 }
 
+/// One JASS expression (`CreateGroup()`, `'hfoo'`, `bj_X + 1`), as the
+/// game's data gives values: what it is, or why it doesn't read.
+pub fn expr(text: &str) -> Result<Expr, String> {
+    let src = format!("function F takes nothing returns nothing\n    return {text}\nendfunction\n");
+    let p = jass_rs::parse(&src).map_err(|e| format!("{text:?}: {}", e.message))?;
+    let lines: Vec<&str> = src.lines().collect();
+    let r = Reader { lines: &lines };
+    match p.items.first() {
+        Some(j::TopLevel::Function(f)) => match f.body.as_slice() {
+            [j::Stmt::Return { value: Some(v), .. }] => Ok(r.expr(v)),
+            _ => Err(format!("{text:?} isn't one expression")),
+        },
+        _ => Err(format!("{text:?} isn't one expression")),
+    }
+}
+
 fn add(m: &mut Module, f: &Source, p: &j::Program, errors: &mut Vec<Error>) {
     let lines: Vec<&str> = f.text.lines().collect();
     let r = Reader { lines: &lines };
