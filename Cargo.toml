@@ -12,3 +12,4 @@ path = "src/lib.rs"
 [dependencies]
 jass-rs = { path = "../jass-rs" }
 parser-rs = { path = "../parser-rs" }
+w3i-rs = { path = "../w3i-rs" }

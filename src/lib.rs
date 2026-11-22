@@ -4,6 +4,7 @@
 pub mod from_jass;
 pub mod ir;
 pub mod jass;
+pub mod map;
 
 /// The game's JASS of `files` (this toolchain's JASS, or the game's), in
 /// their order: see [`jass`].
