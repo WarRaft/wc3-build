@@ -269,6 +269,17 @@ Shape isn't built into JASS yet").
   over that frame's bit rate (so a variable bit rate file with a Xing
   frame comes out longer than it plays), an ID3v1 tag at its end taken for
   128 bytes more; rounded to the millisecond. The caller reads the file.
+- **`whole`**: a map's whole script (`whole::script`): the map's part
+  made of its files, the code between its start and its end (the
+  triggers' JASS, the map's custom script, the project's code, each with
+  its dialect when its header names none: `from_jass::module_as`), built
+  into the game's JASS. It knows no folders: every file comes from the
+  caller's lookup (`Input::read`, and `read_patched` for the editor's
+  files with their patches: `UI\WorldEditData.txt`): `war3map.w3i` (no
+  map without it), `.w3r`, `.w3c`, `.w3s`, `.doo`, `Units.doo`, the
+  object data, and the game's `UI\MiscData.txt`, `UI\SoundInfo\*.slk`,
+  `Units\*.slk` and abilities' texts. `wc3-server`'s `build` gives it a
+  project's.
 
 ## Tests
 

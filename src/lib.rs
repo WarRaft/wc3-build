@@ -13,6 +13,7 @@ pub mod placed;
 pub mod structs;
 pub mod tables;
 pub mod uglify;
+pub mod whole;
 
 /// The game's JASS of `files` (this toolchain's JASS, or the game's), in
 /// their order: see [`jass`].

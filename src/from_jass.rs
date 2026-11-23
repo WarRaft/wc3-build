@@ -27,6 +27,12 @@ pub struct Source<'a> {
 /// Zinc); every file that doesn't parse, or has what isn't read into the
 /// IR, is an error.
 pub fn module(files: &[Source]) -> Result<Module, Vec<Error>> {
+    module_as(files, jass_rs::Dialect::Jass)
+}
+
+/// [`module`], a file without a `// @dialect` header read as `fallback`
+/// (a `.vj` one as vJASS): the project's dialect.
+pub fn module_as(files: &[Source], fallback: jass_rs::Dialect) -> Result<Module, Vec<Error>> {
     let mut m = Module::default();
     let mut errors = Vec::new();
     for f in files {
@@ -44,7 +50,8 @@ pub fn module(files: &[Source]) -> Result<Module, Vec<Error>> {
             errors.extend(directives);
             continue;
         }
-        match jass_rs::parse_file(f.text) {
+        let dialect = jass_rs::lexer::Dialect::declared(f.text).unwrap_or(if f.name.to_ascii_lowercase().ends_with(".vj") { jass_rs::Dialect::VJass } else { fallback });
+        match jass_rs::parse_with(f.text, dialect) {
             Ok(p) => add(&mut m, f, &p, &mut errors),
             Err(e) => errors.push(Error { origin: Origin { file: f.name.into(), line: e.line }, message: e.message }),
         }
