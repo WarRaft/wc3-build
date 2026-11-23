@@ -61,7 +61,7 @@ fn random_groups_and_item_tables() {
     assert!(t.contains("integer array gg_rg_000"), "{t}");
     assert!(t.contains("call RandomDistAddItem(0, 60)\ncall RandomDistAddItem(1, 40)\nset curset = RandomDistChoose()"), "{t}");
     assert!(t.contains("if curset == 0 then\nset gg_rg_000[0] = 'nfrl'\nset gg_rg_000[1] = -1\nelseif curset == 1 then\nset gg_rg_000[0] = 'nwlt'\nset gg_rg_000[1] = -1\nelse\nset gg_rg_000[0] = -1\nset gg_rg_000[1] = -1\nendif"), "{t}");
-    let t = text(&item_tables(&info, &Objects::default()));
+    let t = text(&item_tables(&info));
     assert!(t.contains("function ItemTable000007_DropItems"), "{t}");
     assert!(t.contains("call RandomDistAddItem(ChooseRandomItemEx(ITEM_TYPE_ANY, 3), 50)\ncall RandomDistAddItem(-1, 50)"), "{t}");
 }

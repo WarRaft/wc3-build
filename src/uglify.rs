@@ -106,7 +106,7 @@ fn uses(body: &[Stmt], out: &mut Vec<String>) {
     each_expr(body, &mut |e| match e {
         Expr::Var(n) | Expr::Index(n, _) | Expr::Code(n) => out.push(n.clone()),
         Expr::Call(c) => out.push(c.name.clone()),
-        Expr::Literal(_) | Expr::Unary(..) | Expr::Binary(..) => {}
+        _ => {}
     });
 }
 
@@ -355,6 +355,11 @@ fn rename_body(body: &mut [Stmt], to: &HashMap<String, String>, own: Option<&Has
                 }
             }
             Stmt::Debug { stmt, .. } => rename_body(std::slice::from_mut(stmt), to, own, types),
+            other => {
+                let (es, bs) = other.oop_parts_mut();
+                es.into_iter().for_each(|e| rename_expr(e, to, own));
+                bs.into_iter().for_each(|b| rename_body(b, to, own, types));
+            }
         }
     }
 }
@@ -411,7 +416,7 @@ fn rename_expr(e: &mut Expr, to: &HashMap<String, String>, own: Option<&HashSet<
             rename_expr(a, to, own);
             rename_expr(b, to, own);
         }
-        Expr::Literal(_) => {}
+        other => other.children_mut().into_iter().for_each(|x| rename_expr(x, to, own)),
     }
 }
 
@@ -479,7 +484,7 @@ fn rename_locals_in(body: &mut [Stmt], to: &HashMap<String, String>) {
                     expr(a, to);
                     expr(b, to);
                 }
-                Expr::Literal(_) | Expr::Code(_) => {}
+                other => other.children_mut().into_iter().for_each(|x| expr(x, to)),
             }
         }
         for s in body {
@@ -515,6 +520,11 @@ fn rename_locals_in(body: &mut [Stmt], to: &HashMap<String, String>) {
                     }
                 }
                 Stmt::Debug { stmt, .. } => vars(std::slice::from_mut(stmt), to),
+                other => {
+                    let (es, bs) = other.oop_parts_mut();
+                    es.into_iter().for_each(|e| expr(e, to));
+                    bs.into_iter().for_each(|b| vars(b, to));
+                }
             }
         }
     }

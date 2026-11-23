@@ -11,3 +11,51 @@ fn literals_as_written_and_errors_with_their_file() {
     assert_eq!(e.len(), 1);
     assert_eq!((e[0].origin.file.as_str(), e[0].origin.line), ("bad.j", 3));
 }
+
+#[test]
+fn vjass_goes_in_as_it_is() {
+    let text = include_str!("../../jass-rs/tests/fixtures/vjass.j");
+    let m = module(&[Source { name: "v.j", text }]).unwrap_or_else(|e| panic!("{e:?}"));
+    let libs: Vec<(&str, bool, Option<&str>, Option<&str>)> = m.libraries.iter().map(|l| (l.name.as_str(), l.scope, l.parent.as_deref(), l.initializer.as_deref())).collect();
+    assert_eq!(libs, [("Counters", false, None, Some("Init")), ("Inner", true, Some("Counters"), Some("Start"))]);
+    let owned = |scope: &str, access| Owner { scope: Some(scope.into()), access };
+    let globals: Vec<(&str, Owner)> = m.globals.iter().map(|g| (g.name.as_str(), g.owner.clone())).collect();
+    assert_eq!(globals, [("count", owned("Counters", Access::Private)), ("MAX", owned("Counters", Access::Public)), ("sized", owned("Counters", Access::Everyone))]);
+    let functions: Vec<(&str, Owner)> = m.functions.iter().map(|f| (f.sig.name.as_str(), f.owner.clone())).collect();
+    assert_eq!(functions, [("Start", owned("Inner", Access::Private)), ("Init", owned("Counters", Access::Private))]);
+    assert_eq!(m.function_types[0].sig.name, "Callback");
+    assert_eq!(m.types[0].name, "IntList");
+    assert!(m.types[0].size.is_some());
+    assert_eq!(m.interfaces[0].methods[1].defaults, Some(Expr::lit("\"shape\"")));
+    assert_eq!(m.mixins[0].name, "Pooled");
+
+    let s = &m.structs[0];
+    assert_eq!((s.name.as_str(), s.extends.as_deref(), s.size.clone()), ("Counter", Some("Shape"), Some(Expr::lit("20000"))));
+    assert_eq!(s.mixins, [("Pooled".to_string(), false), ("Extra".to_string(), true)]);
+    let list = s.fields.iter().find(|f| f.name == "list").unwrap();
+    assert_eq!(list.array, Some(Some(Expr::lit("4"))));
+    let create = &s.methods[0].function.body;
+    let this_type = || Expr::var("thistype");
+    assert_eq!(
+        create[4],
+        Stmt::SetMember { object: Expr::var("this"), name: "id".into(), index: None, value: Expr::Member(Box::new(this_type()), "made".into()), line: 38 }
+    );
+    // A real as written (`2.`).
+    assert_eq!(
+        s.methods[1].function.body[0],
+        Stmt::Return { value: Some(Expr::binary(Expr::Member(Box::new(Expr::var("this")), "value".into()), BinOp::Mul, Expr::lit("2."))), line: 43 }
+    );
+    let start = &m.functions[0].body;
+    assert!(matches!(&start[1], Stmt::CallMethod { call, .. } if call.name == "destroy"));
+    assert!(matches!(&start[3], Stmt::StaticIf { cond, otherwise: Some(_), .. } if *cond == Expr::var("LIBRARY_TimerUtils")));
+    // Not lowered yet.
+    assert!(crate::jass::build(&m).is_err());
+}
+
+#[test]
+fn jasshelpers_preprocessor_is_an_error() {
+    let text = "// @dialect vjass\n//! textmacro T takes X\nfunction $X$ takes nothing returns nothing\nendfunction\n//! endtextmacro\n";
+    let errors = module(&[Source { name: "t.j", text }]).unwrap_err();
+    let found: Vec<(usize, &str)> = errors.iter().map(|e| (e.origin.line, e.message.as_str())).collect();
+    assert_eq!(found, [(2, "JassHelper's `//! textmacro` isn't read yet"), (5, "JassHelper's `//! endtextmacro` isn't read yet")]);
+}

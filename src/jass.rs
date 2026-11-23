@@ -17,6 +17,10 @@
 //!    what it returns. JASS runs one thing at a time, and an evaluated
 //!    function takes no arguments, so no two calls race for those globals.
 //!    The triggers are made at the start of `config` and of `main`.
+//!    Lowering's `F.evaluate(...)` (`wcb__call_F`) goes through it
+//!    wherever `F` is, and `F.execute(...)` (`wcb__exec_F`) too, but runs
+//!    the trigger's action (`wcb__action_F`, a thread of its own, which
+//!    reads the arguments before it can wait).
 //! 4. Locals go to the top of their function: one declared after a
 //!    statement is declared there and set where it was.
 //! 5. `set`, `call`, `local` and `takes nothing returns nothing` are
@@ -53,7 +57,12 @@ pub fn build(m: &Module) -> Result<String, Vec<Error>> {
 
 /// [`build`], as `options` say.
 pub fn build_with(m: &Module, options: &Options) -> Result<Built, Vec<Error>> {
-    let mut m = m.clone();
+    let m = crate::lower::lower(m)?;
+    let errors = m.not_lowered();
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    let mut m = m;
     let mut errors = Vec::new();
     merge_entries(&mut m);
     let deferred = order_globals(&mut m, &mut errors);
@@ -89,6 +98,7 @@ fn entry<'a>(m: &'a mut Module, name: &str) -> &'a mut Function {
         m.functions.push(Function {
             sig: Signature { name: name.into(), params: Vec::new(), returns: None, constant: false },
             body: Vec::new(),
+            owner: Owner::default(),
             origin: Origin { file: String::new(), line: 0 },
         });
     }
@@ -173,7 +183,7 @@ fn rename(body: &mut [Stmt], to: &HashMap<String, String>) {
                 expr(a, to);
                 expr(b, to);
             }
-            Expr::Literal(_) | Expr::Code(_) => {}
+            other => other.children_mut().into_iter().for_each(|x| expr(x, to)),
         }
     }
     for s in body {
@@ -205,6 +215,11 @@ fn rename(body: &mut [Stmt], to: &HashMap<String, String>) {
             Stmt::ExitWhen { cond, .. } => expr(cond, to),
             Stmt::Return { value, .. } => value.iter_mut().for_each(|e| expr(e, to)),
             Stmt::Debug { stmt, .. } => rename(std::slice::from_mut(stmt), to),
+            other => {
+                let (es, bs) = other.oop_parts_mut();
+                es.into_iter().for_each(|e| expr(e, to));
+                bs.into_iter().for_each(|b| rename(b, to));
+            }
         }
     }
 }
@@ -364,8 +379,26 @@ fn sort_functions(m: &Module) -> Vec<usize> {
 fn evaluate_forward_calls(functions: Vec<Function>) -> (Vec<Function>, Vec<Global>) {
     let at: HashMap<String, usize> = functions.iter().enumerate().map(|(i, f)| (f.sig.name.clone(), i)).collect();
     let mut forward: Vec<usize> = Vec::new();
+    // Run in a thread of their own (`wcb__exec_F`, `.execute`).
+    let mut executed: Vec<usize> = Vec::new();
     for (i, f) in functions.iter().enumerate() {
         for c in called(&f.body) {
+            // Called through the trigger wherever they are (lowering's
+            // `.evaluate`, `.execute`).
+            let (through, exec) = match (c.strip_prefix(&format!("{PREFIX}call_")), c.strip_prefix(&format!("{PREFIX}exec_"))) {
+                (Some(n), _) => (at.get(n).copied(), false),
+                (_, Some(n)) => (at.get(n).copied(), true),
+                _ => (None, false),
+            };
+            if let Some(j) = through {
+                if !forward.contains(&j) {
+                    forward.push(j);
+                }
+                if exec && !executed.contains(&j) {
+                    executed.push(j);
+                }
+                continue;
+            }
             if let Some(&j) = at.get(&c)
                 && j > i
                 && !forward.contains(&j)
@@ -382,6 +415,7 @@ fn evaluate_forward_calls(functions: Vec<Function>) -> (Vec<Function>, Vec<Globa
     let mut globals = Vec::new();
     let mut callers = Vec::new();
     let mut thunks: HashMap<usize, Function> = HashMap::new();
+    let mut actions: HashMap<usize, Function> = HashMap::new();
     let mut setup = Vec::new();
     let origin = |f: &Function| f.origin.clone();
     for &j in &forward {
@@ -390,12 +424,12 @@ fn evaluate_forward_calls(functions: Vec<Function>) -> (Vec<Function>, Vec<Globa
         let trig = format!("{PREFIX}trig_{name}");
         let arg = |k: usize| format!("{PREFIX}arg_{name}_{k}");
         let ret = format!("{PREFIX}ret_{name}");
-        globals.push(Global { name: trig.clone(), ty: "trigger".into(), array: false, constant: false, init: None, origin: origin(f) });
+        globals.push(Global { name: trig.clone(), ty: "trigger".into(), array: false, constant: false, init: None, owner: Owner::default(), origin: origin(f) });
         for (k, p) in f.sig.params.iter().enumerate() {
-            globals.push(Global { name: arg(k), ty: p.ty.clone(), array: false, constant: false, init: None, origin: origin(f) });
+            globals.push(Global { name: arg(k), ty: p.ty.clone(), array: false, constant: false, init: None, owner: Owner::default(), origin: origin(f) });
         }
         if let Some(r) = &f.sig.returns {
-            globals.push(Global { name: ret.clone(), ty: r.clone(), array: false, constant: false, init: None, origin: origin(f) });
+            globals.push(Global { name: ret.clone(), ty: r.clone(), array: false, constant: false, init: None, owner: Owner::default(), origin: origin(f) });
         }
         // Above every function: the arguments into the globals, the
         // trigger evaluated, what it returned.
@@ -413,14 +447,28 @@ fn evaluate_forward_calls(functions: Vec<Function>) -> (Vec<Function>, Vec<Globa
         callers.push(Function {
             sig: Signature { name: names[name].clone(), params: f.sig.params.clone(), returns: f.sig.returns.clone(), constant: false },
             body,
+            owner: Owner::default(),
             origin: origin(f),
         });
+        // `.execute`: the arguments into the globals, the trigger's action
+        // run (a thread of its own, which reads them before it can wait).
+        if executed.contains(&j) {
+            let mut body: Vec<Stmt> = f.sig.params.iter().enumerate().map(|(k, p)| Stmt::Set { name: arg(k), index: None, value: Expr::Var(p.name.clone()), line: 0 }).collect();
+            body.push(Stmt::Call { call: Call { name: "TriggerExecute".into(), args: vec![Expr::Var(trig.clone())] }, line: 0 });
+            callers.push(Function {
+                sig: Signature { name: format!("{PREFIX}exec_{name}"), params: f.sig.params.clone(), returns: None, constant: false },
+                body,
+                owner: Owner::default(),
+                origin: origin(f),
+            });
+        }
         // After it: its trigger's condition calls it.
         let call = Call { name: name.clone(), args: (0..f.sig.params.len()).map(|k| Expr::Var(arg(k))).collect() };
         let mut body = vec![match f.sig.returns {
             Some(_) => Stmt::Set { name: ret.clone(), index: None, value: Expr::Call(call), line: 0 },
             None => Stmt::Call { call, line: 0 },
         }];
+        let mut action = body.clone();
         body.push(Stmt::Return { value: Some(Expr::Literal("true".into())), line: 0 });
         let thunk = format!("{PREFIX}thunk_{name}");
         thunks.insert(
@@ -428,17 +476,29 @@ fn evaluate_forward_calls(functions: Vec<Function>) -> (Vec<Function>, Vec<Globa
             Function {
                 sig: Signature { name: thunk.clone(), params: Vec::new(), returns: Some("boolean".into()), constant: false },
                 body,
+                owner: Owner::default(),
                 origin: origin(f),
             },
         );
+        let action_name = format!("{PREFIX}action_{name}");
+        if executed.contains(&j) {
+            // An action keeps nothing it returns.
+            if let Some(Stmt::Set { value: Expr::Call(call), .. }) = action.first().cloned() {
+                action[0] = Stmt::Call { call, line: 0 };
+            }
+            actions.insert(j, Function::new(action_name.clone(), action, origin(f)));
+        }
         setup.push(Stmt::Set { name: trig.clone(), index: None, value: Expr::Call(Call { name: "CreateTrigger".into(), args: Vec::new() }), line: 0 });
         setup.push(Stmt::Call {
             call: Call {
                 name: "TriggerAddCondition".into(),
-                args: vec![Expr::Var(trig), Expr::Call(Call { name: "Condition".into(), args: vec![Expr::Code(thunk)] })],
+                args: vec![Expr::Var(trig.clone()), Expr::Call(Call { name: "Condition".into(), args: vec![Expr::Code(thunk)] })],
             },
             line: 0,
         });
+        if executed.contains(&j) {
+            setup.push(Stmt::call("TriggerAddAction", vec![Expr::Var(trig), Expr::Code(action_name)]));
+        }
     }
     // The calls below go through the callers above.
     let mut out = callers;
@@ -457,12 +517,16 @@ fn evaluate_forward_calls(functions: Vec<Function>) -> (Vec<Function>, Vec<Globa
         if let Some(t) = thunks.remove(&i) {
             out.push(t);
         }
+        if let Some(a) = actions.remove(&i) {
+            out.push(a);
+        }
     }
     // Without a main, one of its own makes them.
     if !out.iter().any(|f| f.sig.name == "main" && is_entry(f)) {
         out.push(Function {
             sig: Signature { name: "main".into(), params: Vec::new(), returns: None, constant: false },
             body: setup,
+            owner: Owner::default(),
             origin: Origin { file: String::new(), line: 0 },
         });
     }
@@ -491,7 +555,7 @@ fn retarget(body: &mut [Stmt], to: &HashMap<String, String>) {
                 expr(a, to);
                 expr(b, to);
             }
-            Expr::Literal(_) | Expr::Var(_) => {}
+            other => other.children_mut().into_iter().for_each(|x| expr(x, to)),
         }
     }
     for s in body {
@@ -520,6 +584,11 @@ fn retarget(body: &mut [Stmt], to: &HashMap<String, String>) {
             Stmt::ExitWhen { cond, .. } => expr(cond, to),
             Stmt::Return { value, .. } => value.iter_mut().for_each(|e| expr(e, to)),
             Stmt::Debug { stmt, .. } => retarget(std::slice::from_mut(stmt), to),
+            other => {
+                let (es, bs) = other.oop_parts_mut();
+                es.into_iter().for_each(|e| expr(e, to));
+                bs.into_iter().for_each(|b| retarget(b, to));
+            }
         }
     }
 }
@@ -663,6 +732,7 @@ fn statement(s: &Stmt, depth: usize, out: &mut String) {
             statement(stmt, depth, &mut inner);
             let _ = write!(out, "{pad}debug {}", inner.trim_start());
         }
+        Stmt::SetMember { .. } | Stmt::CallMethod { .. } | Stmt::StaticIf { .. } => unreachable!("not lowered: build checks Module::not_lowered"),
     }
 }
 
@@ -675,7 +745,7 @@ fn precedence(op: BinOp) -> u8 {
         BinOp::Eq | BinOp::NotEq => 3,
         BinOp::Gt | BinOp::Lt | BinOp::GtEq | BinOp::LtEq => 4,
         BinOp::Add | BinOp::Sub => 5,
-        BinOp::Mul | BinOp::Div => 6,
+        BinOp::Mul | BinOp::Div | BinOp::Mod => 6,
     }
 }
 
@@ -689,6 +759,7 @@ fn expr(e: &Expr, min: u8) -> String {
         Expr::Index(n, i) => (format!("{n}[{}]", expr(i, 0)), 8),
         Expr::Call(c) => (call(c), 8),
         Expr::Code(n) => (format!("function {n}"), 8),
+        Expr::Member(..) | Expr::Method(_) | Expr::Element(..) => unreachable!("not lowered: build checks Module::not_lowered"),
         Expr::Unary(op, x) => {
             let inner = expr(x, UNARY);
             let text = match op {
@@ -714,6 +785,7 @@ fn expr(e: &Expr, min: u8) -> String {
                 BinOp::GtEq => ">=",
                 BinOp::LtEq => "<=",
                 BinOp::And => "and",
+                BinOp::Mod => unreachable!("not lowered: build checks Module::not_lowered"),
                 BinOp::Or => "or",
             };
             // Left to right: the right side binds tighter.

@@ -132,9 +132,9 @@ fn drop_trigger(b: &mut Vec<Stmt>, me: &Expr, unit: bool, drops: String) {
 }
 
 /// An item of a set: its id, or a random item of a level and class
-/// (`YlI1`: `Y`, the class (`Y` any, `i` permanent ...), `I`, the level);
-/// none (`-1`) for one World Editor doesn't drop ([`Objects::droppable`]).
-fn drop_item(r: Rawcode, objects: &Objects) -> Expr {
+/// (`YlI1`: `Y`, the class (`Y` any, `i` permanent ...), `I`, the level),
+/// of any level (Diablo III beta drops items of 11 and 13).
+fn drop_item(r: Rawcode) -> Expr {
     const CLASSES: [&str; 8] = [
         "ITEM_TYPE_PERMANENT",
         "ITEM_TYPE_CHARGED",
@@ -145,7 +145,7 @@ fn drop_item(r: Rawcode, objects: &Objects) -> Expr {
         "ITEM_TYPE_MISCELLANEOUS",
         "ITEM_TYPE_UNKNOWN",
     ];
-    if r.is_none() || r.to_int() == u32::MAX || !objects.droppable(r) {
+    if r.is_none() || r.to_int() == u32::MAX {
         return Expr::int(-1);
     }
     let [a, class, i, level] = r.0;
@@ -172,7 +172,7 @@ pub(crate) fn drop_sets(sets: &[ItemSet]) -> Option<Vec<&ItemSet>> {
 /// `<Kind><index>_DropItems`: one item of each set dropped where the thing
 /// died, unless it's a hidden unit or one changing owner from any but
 /// Neutral Hostile; a set short of 100 percent may drop none (`-1`).
-pub(crate) fn drop_items(name: String, sets: &[&ItemSet], objects: &Objects) -> Function {
+pub(crate) fn drop_items(name: String, sets: &[&ItemSet]) -> Function {
     let v = Expr::var;
     let null = || Expr::lit("null");
     let mut drops = Vec::new();
@@ -181,7 +181,7 @@ pub(crate) fn drop_items(name: String, sets: &[&ItemSet], objects: &Objects) -> 
         let mut total = 0;
         for &(item, chance) in set.iter() {
             total += chance;
-            drops.push(Stmt::call("RandomDistAddItem", vec![drop_item(item, objects), Expr::int(chance)]));
+            drops.push(Stmt::call("RandomDistAddItem", vec![drop_item(item), Expr::int(chance)]));
         }
         if total < 100 {
             drops.push(Stmt::call("RandomDistAddItem", vec![Expr::int(-1), Expr::int(100 - total)]));
@@ -288,7 +288,7 @@ fn destructables(p: &Placing, doodads: &[Doodad], made: &mut Made) {
             }
         } else if let Some(sets) = drop_sets(&d.item_sets) {
             let f = format!("Doodad{index:06}_DropItems");
-            made.functions.push(drop_items(f.clone(), &sets, p.objects));
+            made.functions.push(drop_items(f.clone(), &sets));
             drop_trigger(&mut b, &me, false, f);
         }
     }
@@ -570,7 +570,7 @@ fn unit(p: &Placing, index: usize, u: &Unit, out: &mut Vec<Stmt>, made: &mut Mad
         }
     } else if let Some(sets) = drop_sets(&u.item_sets) {
         let f = format!("Unit{index:06}_DropItems");
-        made.functions.push(drop_items(f.clone(), &sets, p.objects));
+        made.functions.push(drop_items(f.clone(), &sets));
         drop_trigger(&mut b, &me, true, f);
     }
     match random {

@@ -81,9 +81,9 @@ fn what_is_placed() {
         "    unit gg_unit_Hpal_0002 = null\n",
         // The game makes the wall; the gate is named, dead and has its own
         // height; the tree is half alive and drops one of its items, the
-        // claws or none, its empty set none.
+        // claws, the crown (of any level) or none, its empty set none.
         "    set gg_dest_LTg1_0003 = CreateDeadDestructableZ('LTg1', 0.0, 0.0, 0.0, 0.000, 1.000, 0)\n    set d = CreateDestructable('LTlt', 64.0, -32.0, 180.000, 1.000, 0)\n    set life = GetDestructableLife(d)\n    call SetDestructableLife(d, 0.50 * life)\n    set t = CreateTrigger()\n    call TriggerRegisterDeathEvent(t, d)\n    call TriggerAddAction(t, function SaveDyingWidget)\n    call TriggerAddAction(t, function Doodad000000_DropItems)\n",
-        "        call RandomDistReset()\n        call RandomDistAddItem('ratc', 60)\n        call RandomDistAddItem(-1, 20)\n        call RandomDistAddItem(-1, 20)\n        set itemID = RandomDistChoose()\n",
+        "        call RandomDistReset()\n        call RandomDistAddItem('ratc', 60)\n        call RandomDistAddItem('mcri', 20)\n        call RandomDistAddItem(-1, 20)\n        set itemID = RandomDistChoose()\n",
         "function CreateAllItems takes nothing returns nothing\n    local integer itemID\n    call CreateItem('ratc', 5.0, 5.0)\nendfunction\n",
         "    set gg_unit_Hpal_0002 = CreateUnit(p, 'Hpal', 10.0, 20.0, 0.000)\n    call SetHeroLevel(gg_unit_Hpal_0002, 3, false)\n    call SetUnitColor(gg_unit_Hpal_0002, ConvertPlayerColor(3))\n    call SelectHeroSkill(gg_unit_Hpal_0002, 'AHhb')\n    call SelectHeroSkill(gg_unit_Hpal_0002, 'AHhb')\n    call IssueImmediateOrder(gg_unit_Hpal_0002, \"healon\")\n    call UnitAddItemToSlotById(gg_unit_Hpal_0002, 'ratc', 0)\n",
         "function CreateNeutralHostile takes nothing returns nothing\n    local player p = Player(PLAYER_NEUTRAL_AGGRESSIVE)\n    local unit u\n    local integer unitID\n    local trigger t\n    local real life\n    set u = CreateUnit(p, 'hfoo', 0.0, 0.0, 0.000)\n    set life = GetUnitState(u, UNIT_STATE_LIFE)\n    call SetUnitState(u, UNIT_STATE_LIFE, 0.50 * life)\n    call SetUnitAcquireRange(u, 200.0)\nendfunction\n",

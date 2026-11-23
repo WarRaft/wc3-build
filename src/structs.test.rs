@@ -1,0 +1,288 @@
+use crate::from_jass::{Source, module};
+
+fn build(files: &[(&str, &str)]) -> Result<String, Vec<String>> {
+    let sources: Vec<Source> = files.iter().map(|(name, text)| Source { name, text }).collect();
+    let m = module(&sources).unwrap_or_else(|e| panic!("{e:?}"));
+    let out = crate::jass::build(&m).map_err(|e| e.into_iter().map(|e| e.message).collect::<Vec<_>>())?;
+    as_the_games(&out);
+    Ok(out.lines().map(str::trim).collect::<Vec<_>>().join("\n"))
+}
+
+/// The game's declarations the tests' scripts use.
+pub(crate) const COMMON: &str = "\
+type agent extends handle
+type timer extends agent
+native CreateTimer takes nothing returns timer
+native TimerStart takes timer whichTimer, real timeout, boolean periodic, code handlerFunc returns nothing
+native ExecuteFunc takes string funcName returns nothing
+native I2S takes integer i returns string
+native DoNothing takes nothing returns nothing
+native BJDebugMsg takes string msg returns nothing
+native ModuloInteger takes integer dividend, integer divisor returns integer
+native InitBlizzard takes nothing returns nothing
+type trigger extends agent
+type boolexpr extends agent
+type conditionfunc extends boolexpr
+type triggercondition extends agent
+type triggeraction extends handle
+native CreateTrigger takes nothing returns trigger
+native TriggerEvaluate takes trigger whichTrigger returns boolean
+native TriggerExecute takes trigger whichTrigger returns nothing
+native Condition takes code func returns conditionfunc
+native TriggerAddCondition takes trigger whichTrigger, boolexpr condition returns triggercondition
+native TriggerAddAction takes trigger whichTrigger, code actionFunc returns triggeraction
+native TriggerSleepAction takes real timeout returns nothing
+";
+
+/// `out`, as the game reads it: no rule of `pure`, names and types right
+/// over [`COMMON`].
+pub(crate) fn as_the_games(out: &str) {
+    let program = jass_rs::parse(out).unwrap_or_else(|e| panic!("line {}: {}\n{out}", e.line, e.message));
+    let pure: Vec<_> = jass_rs::lint(&program)
+        .into_iter()
+        .filter(|d| parser_rs::find_rule(d.rule).is_some_and(|r| r.groups.contains(&parser_rs::group::PURE)) || d.rule == parser_rs::rule::DUPLICATE_DECLARATION)
+        .collect();
+    assert!(pure.is_empty(), "{pure:?}\n{out}");
+    let common = jass_rs::names::Declarations::of(&jass_rs::parse(COMMON).unwrap());
+    let problems = jass_rs::names::check(&program, &[&common]);
+    assert!(problems.is_empty(), "{problems:?}\n{out}");
+}
+
+
+const COUNTERS: &str = r#"// @dialect vjass
+library Counters
+    module Counted
+        static integer made = 0
+        static method onInit takes nothing returns nothing
+            set thistype.made = 0
+        endmethod
+    endmodule
+
+    struct Counter[100]
+        integer value = 5
+        real ratio
+        integer array marks[4]
+        static Counter last
+        implement Counted
+
+        static method create takes integer v returns thistype
+            local thistype c = thistype.allocate()
+            set c.value = v
+            set c.marks[2] = c.value + c.marks[1]
+            set thistype.made = thistype.made + 1
+            set Counter.last = c
+            return c
+        endmethod
+
+        method twice takes nothing returns integer
+            return .value * 2
+        endmethod
+
+        method onDestroy takes nothing returns nothing
+            set .value = 0
+        endmethod
+
+        static method onInit takes nothing returns nothing
+            call TimerStart(CreateTimer(), 1., true, function thistype.tick)
+        endmethod
+
+        static method tick takes nothing returns nothing
+            call Counter.last.destroy()
+        endmethod
+    endstruct
+
+    struct Plain extends array
+        integer x
+        static method get takes integer i returns thistype
+            return thistype(i)
+        endmethod
+    endstruct
+
+    function Use takes nothing returns integer
+        local Counter c = Counter.create(3)
+        local integer n = c.twice() + Counter(7).value + Plain.get(2).x
+        call c.destroy()
+        return n
+    endfunction
+endlibrary
+"#;
+
+#[test]
+fn structs_into_jass() {
+    let out = build(&[("c.j", COUNTERS)]).unwrap_or_else(|e| panic!("{e:?}"));
+    for part in [
+        // Fields as arrays, static ones as globals; the allocator's.
+        "integer array s__Counter_value",
+        "real array s__Counter_ratio",
+        "integer array s__Counter_marks",
+        "integer s__Counter_last",
+        "integer s__Counter_made = 0",
+        "integer si__Counter_F = 0",
+        "integer array si__Counter_V",
+        "integer array s__Plain_x",
+        // A field's value set when allocated; past its size, none.
+        "function s__Counter__allocate takes nothing returns integer\nlocal integer this = si__Counter_F\nif this != 0 then\nset si__Counter_F = si__Counter_V[this]\nelse\nset si__Counter_I = si__Counter_I + 1\nset this = si__Counter_I\nendif\nif this >= 100 then\nreturn 0\nendif\nset si__Counter_V[this] = -1\nset s__Counter_value[this] = 5\nreturn this\nendfunction",
+        "function s__Counter_destroy takes integer this returns nothing\nif this != 0 and si__Counter_V[this] == -1 then\ncall s__Counter_onDestroy(this)\nset si__Counter_V[this] = si__Counter_F\nset si__Counter_F = this\nendif\nendfunction",
+        // Methods, `this` first; a field array of 4 by `this * 4 + i`.
+        "function s__Counter_create takes integer v returns integer\nlocal integer c = s__Counter__allocate()\nset s__Counter_value[c] = v\nset s__Counter_marks[c * 4 + 2] = s__Counter_value[c] + s__Counter_marks[c * 4 + 1]",
+        "set s__Counter_made = s__Counter_made + 1\nset s__Counter_last = c\nreturn c",
+        "function s__Counter_twice takes integer this returns integer\nreturn s__Counter_value[this] * 2",
+        "call TimerStart(CreateTimer(), 1., true, function s__Counter_tick)",
+        "call s__Counter_destroy(s__Counter_last)",
+        // A cast is its value.
+        "function s__Plain_get takes integer i returns integer\nreturn i",
+        "local integer c = s__Counter_create(3)\nlocal integer n = s__Counter_twice(c) + s__Counter_value[7] + s__Plain_x[s__Plain_get(2)]\ncall s__Counter_destroy(c)",
+        // The module's `onInit` and the struct's both run.
+        "call ExecuteFunc(\"s__Counter_onInit__Counted\")\ncall ExecuteFunc(\"s__Counter_onInit\")",
+    ] {
+        assert!(out.contains(part), "{part}\nnot in:\n{out}");
+    }
+}
+
+#[test]
+fn what_structs_cant_be() {
+    let src = "// @dialect vjass\ninterface I\n    method f takes nothing returns nothing\nendinterface\nstruct S extends I\n    T d\n    delegate T e\nendstruct\nstruct T\nendstruct\nfunction F takes nothing returns nothing\n    local integer i = 0\n    call i.g()\nendfunction\n";
+    let found = build(&[("e.j", src)]).unwrap_err();
+    assert_eq!(
+        found,
+        ["struct S: `delegate` isn't built into JASS yet", "struct S has no method f of interface I", ".g() of what isn't a struct (or whose type can't be told)"],
+        "{found:#?}"
+    );
+}
+
+#[test]
+fn interfaces_children_and_stubs_by_type() {
+    let src = r#"// @dialect vjass
+library Shapes
+    interface Shape
+        method area takes nothing returns real
+        method name takes nothing returns string defaults "shape"
+    endinterface
+
+    struct Square extends Shape
+        real side = 1.
+        method area takes nothing returns real
+            return .side * .side
+        endmethod
+        method name takes nothing returns string
+            return "square"
+        endmethod
+    endstruct
+
+    struct Circle extends Shape
+        real r
+        method area takes nothing returns real
+            return 3.14 * .r * .r
+        endmethod
+        method onDestroy takes nothing returns nothing
+            set .r = 0.
+        endmethod
+    endstruct
+
+    struct Animal
+        integer legs = 4
+        stub method sound takes integer times returns string
+            return "..."
+        endmethod
+        method walk takes nothing returns integer
+            return .legs
+        endmethod
+        method onDestroy takes nothing returns nothing
+            set .legs = 0
+        endmethod
+    endstruct
+
+    struct Bird extends Animal
+        integer wings = 2
+        method sound takes integer times returns string
+            return super.sound(times) + "tweet"
+        endmethod
+        method onDestroy takes nothing returns nothing
+            set .wings = 0
+        endmethod
+    endstruct
+
+    function Use takes nothing returns real
+        local Shape s = Square.create()
+        local Animal a = Bird.create()
+        local real x = s.area()
+        call BJDebugMsg(s.name() + a.sound(2) + I2S(a.walk() + a.getType() + Bird.typeid))
+        call s.destroy()
+        call a.destroy()
+        return x
+    endfunction
+endlibrary
+"#;
+    let out = build(&[("s.j", src)]).unwrap_or_else(|e| panic!("{e:?}"));
+    for part in [
+        // One free list a family, the instance's type kept.
+        "integer si__Shape_F = 0",
+        "integer array si__Shape_type",
+        "integer array si__Animal_type",
+        "function s__Square__allocate takes nothing returns integer\nlocal integer this = si__Shape_F",
+        "set si__Shape_type[this] = 1\nset s__Square_side[this] = 1.\nreturn this",
+        // A child's allocate: its type, its parent's fields and its own.
+        "set si__Animal_type[this] = 2\nset s__Animal_legs[this] = 4\nset s__Bird_wings[this] = 2\nreturn this",
+        // By the type: the arguments into globals, the type's trigger.
+        "function wcb__d_Shape_area takes integer this returns real\nset wcb__da_Shape_area_0 = this\ncall TriggerEvaluate(wcb__dt_Shape_area[si__Shape_type[this]])\nreturn wcb__dr_Shape_area\nendfunction",
+        // No method of its own: the interface's `defaults`.
+        "if wcb__dt_Shape_name[si__Shape_type[this]] == null then\nreturn \"shape\"\nendif",
+        "function wcb__dthunk_Circle_area takes nothing returns boolean\nset wcb__dr_Shape_area = s__Circle_area(wcb__da_Shape_area_0)\nreturn true",
+        "function wcb__d_Animal_sound takes integer this, integer times returns string\nset wcb__da_Animal_sound_0 = this\nset wcb__da_Animal_sound_1 = times",
+        // `super`: the parent's, straight.
+        "return s__Animal_sound(this, times) + \"tweet\"",
+        // Not a stub: the parent's, straight; the type; a struct's type.
+        "s__Animal_walk(a) + si__Animal_type[a] + 2",
+        "local real x = wcb__d_Shape_area(s)",
+        // Destroyed by the type: the child's `onDestroy`, then the parent's.
+        "function wcb__dthunk_Bird__destroy takes nothing returns boolean\ncall s__Bird_onDestroy(wcb__da_Animal__destroy)\ncall s__Animal_onDestroy(wcb__da_Animal__destroy)\nreturn true",
+        "call s__Shape__destroy(s)\ncall s__Animal__destroy(a)",
+        // The triggers made before anything runs.
+        "set wcb__dt_Shape_area[1] = CreateTrigger()\ncall TriggerAddCondition(wcb__dt_Shape_area[1], Condition(function wcb__dthunk_Square_area))",
+    ] {
+        assert!(out.contains(part), "{part}\nnot in:\n{out}");
+    }
+    assert!(out.contains("wcb__dthunk_Square_name") && !out.contains("wcb__dthunk_Circle_name"), "{out}");
+}
+
+#[test]
+fn evaluate_and_execute_through_triggers() {
+    let src = r#"// @dialect vjass
+library L
+    function Twice takes integer x returns integer
+        return x * 2
+    endfunction
+    function Late takes integer x, real r returns nothing
+        call TriggerSleepAction(r)
+        call BJDebugMsg(I2S(x))
+    endfunction
+    struct S
+        integer v
+        method add takes integer d returns integer
+            set .v = .v + d
+            return .v
+        endmethod
+    endstruct
+    function Go takes nothing returns nothing
+        local S s = S.create()
+        local integer n = Twice.evaluate(3) + s.add.evaluate(1)
+        call Late.execute(n, 2.)
+    endfunction
+endlibrary
+"#;
+    let out = build(&[("e.j", src)]).unwrap_or_else(|e| panic!("{e:?}"));
+    for part in [
+        // Above every function: the arguments into globals, the trigger.
+        "function wcb__call_Twice takes integer x returns integer\nset wcb__arg_Twice_0 = x\ncall TriggerEvaluate(wcb__trig_Twice)\nreturn wcb__ret_Twice\nendfunction",
+        "function wcb__call_s__S_add takes integer this, integer d returns integer\nset wcb__arg_s__S_add_0 = this\nset wcb__arg_s__S_add_1 = d",
+        "function wcb__exec_Late takes integer x, real r returns nothing\nset wcb__arg_Late_0 = x\nset wcb__arg_Late_1 = r\ncall TriggerExecute(wcb__trig_Late)\nendfunction",
+        // After each: what the trigger runs.
+        "function wcb__thunk_Twice takes nothing returns boolean\nset wcb__ret_Twice = Twice(wcb__arg_Twice_0)\nreturn true",
+        "function wcb__action_Late takes nothing returns nothing\ncall Late(wcb__arg_Late_0, wcb__arg_Late_1)\nendfunction",
+        "local integer n = wcb__call_Twice(3) + wcb__call_s__S_add(s, 1)\ncall wcb__exec_Late(n, 2.)",
+        // The triggers made in `main`.
+        "call TriggerAddAction(wcb__trig_Late, function wcb__action_Late)",
+    ] {
+        assert!(out.contains(part), "{part}\nnot in:\n{out}");
+    }
+}

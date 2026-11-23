@@ -17,7 +17,6 @@ use w3abdhqtu_rs::{Kind, ObjectData, Value};
 pub struct Objects {
     buildings: HashSet<Rawcode>,
     items: HashSet<Rawcode>,
-    item_levels: HashMap<Rawcode, i32>,
     team_colors: HashMap<Rawcode, i32>,
     hero_abilities: HashSet<Rawcode>,
     /// Unit types with the gold mine's ability (`Agld`).
@@ -59,13 +58,6 @@ impl Objects {
         let truth = |v: String| v.trim() == "1";
         if first.eq_ignore_ascii_case("itemID") {
             self.items.extend(rows().map(|(_, id)| id));
-            if let Some(c) = column("Level") {
-                for (r, id) in rows() {
-                    if let Ok(v) = table.text(r, c).trim().parse() {
-                        self.item_levels.insert(id, v);
-                    }
-                }
-            }
             return;
         }
         if first.eq_ignore_ascii_case("unitAbilID") {
@@ -156,9 +148,6 @@ impl Objects {
                         if self.items.contains(&o.base) || data.kind == Kind::Item {
                             self.items.insert(id);
                         }
-                        if let Some(&l) = self.item_levels.get(&o.base) {
-                            self.item_levels.insert(id, l);
-                        }
                         if let Some(&c) = self.team_colors.get(&o.base) {
                             self.team_colors.insert(id, c);
                         }
@@ -179,9 +168,6 @@ impl Objects {
                         } else {
                             self.buildings.remove(&id);
                         }
-                    }
-                    if let Some(l) = int(field(o, b"ilev")) {
-                        self.item_levels.insert(id, l);
                     }
                     if let Some(c) = int(field(o, b"utco")) {
                         self.team_colors.insert(id, c);
@@ -222,14 +208,6 @@ impl Objects {
     /// unknown.
     pub fn team_color(&self, unit: Rawcode) -> Option<i32> {
         self.team_colors.get(&unit).copied().filter(|&c| c >= 0)
-    }
-
-    /// Whether an item goes into a set of items dropped as itself: World
-    /// Editor writes one above level 10 as none (`-1`). Seen once (an item
-    /// of level 50 in CruiserCommand); the limit is the levels its random
-    /// items have.
-    pub fn droppable(&self, item: Rawcode) -> bool {
-        self.item_levels.get(&item).is_none_or(|&l| l <= 10)
     }
 
     /// Whether a unit type is a gold mine: World Editor sets its gold.

@@ -10,11 +10,35 @@ into it as code too.
 ## What's there
 
 - **`ir`**: the model: types, natives, globals, functions, statements,
-  expressions. Each item knows its file and line (`Origin`) for errors; a
-  literal is kept as it was written (`'hfoo'`, `$FF`, `.5`).
-- **`from_jass`**: JASS files (this toolchain's or the game's, parsed by
-  `jass-rs`) into one module, in their order. Zinc isn't built yet; a
-  statement outside a function is an error.
+  expressions, and what vJASS and Zinc add as items of their own:
+  libraries and scopes (`requires`, initializer, the scope they're in),
+  structs (size, `extends`, fields, methods, the modules they take in),
+  interfaces (with `defaults`), modules, function interfaces, dynamic
+  array types. Every global, function, struct ... has its `Owner`: its
+  library or scope, and who sees it (everyone; vJASS's `public`, as
+  `Scope_name` outside; private). A name is kept as written there, and
+  `a.b`, `a.b()`, `a.b[i]`, `set a.b = v`, `static if` and `%` as they
+  are: what `a` is takes the types, which lowering has (the build's stage
+  4). Each item knows its file and line (`Origin`) for errors; a literal
+  is kept as it was written (`'hfoo'`, `$FF`, `.5`).
+- **`from_jass`**: JASS and vJASS files (parsed by `jass-rs`) into one
+  module, in their order; a `.zn` file and a `//! zinc` block go to
+  `from_zinc`. A statement outside a function is an error, and so is
+  each of JassHelper's preprocessor directives (`//! textmacro`,
+  `//! runtextmacro`, `//! inject` ...), checked before the file is
+  parsed: none is read yet, and none is lost quietly. A `static if` with
+  `elseif`s is one in each one's `else`; a `keyword` is left out.
+- **`from_zinc`**: Zinc into the same IR. A library's members are
+  private unless `public` and its `onInit` is its initializer; outside a
+  library (this toolchain's global scope) everything is everyone's.
+  Zinc's own forms become JASS's: `while` and `do ... while` a `loop`
+  with an `exitwhen not (...)`; `for (0 <= i < n)` sets `i` to the first
+  value (one past a strict bound), leaves when past the other
+  (`exitwhen i >= n`), and steps by 1 at the end, up or down as the
+  bounds say; `break` is `exitwhen true`; `x += v` is `set x = x + v`;
+  `else if` an `elseif`; a block its statements. An anonymous function is
+  a function of its own (`wcb__anon_<n>`, private to its library), named
+  where it was. An array of more than one dimension isn't read yet.
 - **`jass`**: the game's JASS out of a module:
   1. Every `main` and every `config` (taking and returning nothing)
      merged into one, their statements in the order of the files; a local
@@ -32,7 +56,11 @@ into it as code too.
      `F`) calls `F` and keeps what it returns. JASS runs one thing at a
      time and an evaluated function takes no arguments, so no two calls
      race for those globals. The triggers are made at the start of
-     `config` and `main` (a `main` is made if there's none).
+     `config` and `main` (a `main` is made if there's none). Lowering's
+     `F.evaluate(...)` (`wcb__call_F`) goes the same way wherever `F` is,
+     and `F.execute(...)` (`wcb__exec_F`) too, but runs the trigger's
+     action (`wcb__action_F`): a thread of its own, which reads the
+     arguments before it can wait.
   4. Locals to the top of their function: those before its first other
      statement stay; any other is declared at the top and set where it
      was.
@@ -41,7 +69,63 @@ into it as code too.
      (`and` looser than `or`).
 
 `jass_of(files)` is the two together. `wc3-mcp`'s `jass_build` runs it on
-files or a folder.
+files or a folder. Before step 1 the module is lowered (`lower`); what
+isn't lowered yet is refused, each item with where it is ("interface
+Shape isn't built into JASS yet").
+
+- **`lower`** (the build's stage 4): what vJASS and Zinc add, made into
+  JASS, for the JASS output only (AngelScript keeps classes).
+  - Libraries in the order of `requires` (one required and not there is
+    an error, unless `optional`; so is a cycle). A private name is
+    `<scope>__<name>` (a scope in a scope `<outer>_<inner>__<name>`), a
+    public one `<scope>_<name>`; a name used in a scope is its own, then
+    its parent's ..., then everyone's, a function's parameters and locals
+    first.
+  - Initializers run at map initialization, a library's and a struct's
+    `onInit` each by `ExecuteFunc` (a thread of its own), a scope's
+    called straight (as JassHelper's in Diablo III beta; the others
+    aren't seen in a map yet): first the `onInit`s of structs in no
+    library, then for each library in order its structs' `onInit`s (a
+    module's before its struct's) and its initializer, then the
+    scopes'. They're called right after `InitBlizzard()`, as
+    JassHelper does (before `InitGlobals` sets the triggers' variables);
+    without it, a `main` of their own after the first.
+  - A trigger's `InitTrig_<name>` that no code has (custom text that's
+    a scope or a library with an initializer of its own) isn't called,
+    as JassHelper does.
+  - `static if` keeps the branch its constants choose: `LIBRARY_<name>`,
+    `DEBUG_MODE` (false), constant boolean globals, `not`, `and`, `or`,
+    `==`, `!=`; anything else is an error. `%` is `ModuloInteger`
+    (`ModuloReal` by a real literal).
+- **`structs`** (part of `lower`), as JassHelper does: an instance's field
+  `f` of `S` the array `s__S_f` (a field array of `k` by `this * k + i`),
+  a static one the global `s__S_f`; a method the function `s__S_m`,
+  `this` first; an allocator but for `extends array` (a free list,
+  `si__S_F`, `si__S_I`, `si__S_V`: `s__S__allocate` gives back the last
+  instance given back or a new one, none (0) past the size, and sets the
+  fields that have a value; `s__S_destroy` runs `onDestroy` and gives it
+  back, but not one that isn't taken; `s__S_deallocate` only gives it
+  back). `S.create` is the struct's own `create`, else `allocate`;
+  `S(x)` and `thistype(x)` are `x`; modules are taken in.
+  `F.evaluate(...)` and `F.execute(...)`, of a function or a method
+  (`x.m.evaluate(...)`), go through its trigger, the arguments in globals
+  (above). A family of several (an interface's structs, a struct and its
+  children) shares its root's free list and keeps each instance's type
+  (`si__R_type`); a parent's fields are the parent's, and allocating a
+  child sets its parent's fields too. A method of an interface, a `stub`
+  method and `destroy` go by the instance's type: `wcb__d_R_m` puts the
+  arguments into globals of its own and evaluates the type's trigger
+  (`wcb__dt_R_m[type]`), whose condition calls that struct's method (or
+  its parent's) and keeps what it returns; a type without one returns
+  the interface's `defaults`; destroying runs the struct's `onDestroy`,
+  then its parents'. The triggers are made before any initializer runs.
+  Every other call is straight, `super.m()` to the parent's.
+  `S.typeid` is the struct's type, `x.getType()` the instance's. A struct
+  must have every method of its interface that has no `defaults`. What
+  `a` in `a.b` is comes from the types: parameters, locals, globals,
+  fields, what functions and methods return, casts. A struct's type is
+  `integer`. Not lowered yet (errors): `delegate`, operators, function
+  interfaces, more than 8190 instances.
 
 - **`map`**: the map's own part of its script, out of its files, as World
   Editor makes it, made as the IR's nodes (`ir`'s `Expr::call`,
@@ -57,7 +141,8 @@ files or a folder.
     terrain fog (its color stored blue, green, red), the map's weather
     over the whole map, water tint, sound environment (the tileset's when
     none), ambient sounds, music, then `InitSounds` (`war3map.w3s`),
-    `CreateRegions` (`war3map.w3r`, each with its weather and its sound),
+    `CreateRegions` (`war3map.w3r`, each with its weather and its sound;
+    two of a name declared once, each set),
     `CreateCameras` (`war3map.w3c`), `InitUpgrades`, `InitTechTree`,
     `InitRandomGroups` (`tables`), what's placed
     (`CreateAllDestructables`, `CreateAllItems`, `CreateAllUnits`:
@@ -145,9 +230,10 @@ files or a folder.
   `*AbilityFunc.txt` `Orderon`/`Orderoff`), then the map's object data,
   a custom object taking its standard one's. World Editor's quirks: a
   custom ability's order is always written, `""` when its standard one
-  has none (a standard ability with none gets no call); an item above
-  level 10 in a set of drops is written as none (`-1`; seen once, an
-  item of level 50).
+  has none (a standard ability with none gets no call). An item of a set
+  of drops is written as itself whatever its level (Diablo III beta's of
+  11 and 13); CruiserCommand's `war3map.j` writes one of level 50 as none
+  (`-1`), which nothing in its files explains.
 - **`uglify`**: shorter names, on the finished tree (`jass::Options`'s
   `uglify`, `jass::build_with`): every name the module declares that the
   game doesn't need as it is (its functions but `main` and `config`,
@@ -216,4 +302,20 @@ files, with its object data), `WTG_TEXT`, `MAP_PATCH` (a project's
 first, with `SoundInfo`; the `Units` folder next to each gives the
 tables of `objects`), `GAME_FILES` (the game's sound files). The names
 the code uses are World Editor's script's, but for what the map's part
-makes.
+makes; in `main`, what the map's code calls (JassHelper's initializers)
+isn't the map's part.
+
+The whole map (`the_whole_main_as_world_editors`) takes `MAP_TRIGGERS`
+(the triggers' JASS) and `MAP_CODE` (the map's code: its `war3map.wct`'s
+header and the custom text of each trigger that's on, vJASS and all),
+builds them with the map's part, and compares the `main` with the one of
+its `war3map.j` (World Editor's, or JassHelper's after it); with
+`JASS_GAME` (folders with `common.j` and `Blizzard.j`) what's built must
+have no problem of names, types or the game's grammar that the map's
+`war3map.j` hasn't (`BUILT_OUT` keeps the script). Diablo III beta (a
+mix of 237 triggers and a `war3map.wct` of plain JASS and a vJASS scope):
+its map's part is World Editor's (12 angles one off in the last digit);
+the whole map builds (24,846 lines), its `main` is JassHelper's 667
+calls (211 triggers set up alike), and it checks clean, as its
+`war3map.j`. The Castle with its code: 1475 calls, 534 triggers, its
+`war3map.j`'s one problem and no other.

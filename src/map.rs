@@ -280,7 +280,7 @@ pub fn start(map: &Map, game: &GameData) -> Result<Module, Vec<Error>> {
         m.globals.extend(globals);
         parts.push("InitRandomGroups");
     }
-    m.functions.extend(crate::tables::item_tables(info, map.objects));
+    m.functions.extend(crate::tables::item_tables(info));
     let made = crate::placed::make(&crate::placed::Placing {
         info,
         doodads: map.doodads,
@@ -559,7 +559,11 @@ fn regions(r: &w3r_rs::Regions) -> (Function, Vec<Global>) {
     }
     for g in &r.regions {
         let name = format!("gg_rct_{}", wtg_rs::jass::ident(&g.name));
-        globals.push(global(name.clone(), "rect"));
+        // Two of a name: declared once, each set (World Editor's, Diablo III
+        // beta's).
+        if !globals.iter().any(|x: &Global| x.name == name) {
+            globals.push(global(name.clone(), "rect"));
+        }
         b.push(Stmt::set(name.clone(), Expr::call("Rect", vec![coord(g.left), coord(g.bottom), coord(g.right), coord(g.top)])));
         if g.weather != w3i_rs::Rawcode::NONE {
             b.push(Stmt::set("we", Expr::call("AddWeatherEffect", vec![Expr::var(name.clone()), rawcode(g.weather)])));

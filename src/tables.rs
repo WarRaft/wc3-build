@@ -9,7 +9,6 @@
 use w3i_rs::{Info, Rawcode};
 
 use crate::ir::*;
-use crate::objects::Objects;
 
 const ORIGIN: &str = "the map";
 
@@ -147,13 +146,13 @@ pub fn random_groups(info: &Info) -> Option<(Function, Vec<Global>)> {
 
 /// `ItemTable<number>_DropItems` for each of the map's item tables, as a
 /// thing's own drops (`placed`).
-pub fn item_tables(info: &Info, objects: &Objects) -> Vec<Function> {
+pub fn item_tables(info: &Info) -> Vec<Function> {
     info.item_tables
         .iter()
         .map(|t| {
             let sets: Vec<doo_rs::ItemSet> = t.sets.iter().map(|s| s.iter().map(|&(chance, r)| (r, chance.max(0) as u32)).collect()).collect();
             let sets = crate::placed::drop_sets(&sets).unwrap_or_default();
-            crate::placed::drop_items(format!("ItemTable{:06}_DropItems", t.number), &sets, objects)
+            crate::placed::drop_items(format!("ItemTable{:06}_DropItems", t.number), &sets)
         })
         .collect()
 }

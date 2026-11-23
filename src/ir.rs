@@ -1,8 +1,13 @@
 //! The model of a map's code that every source goes into and every output
-//! is made from (see the README). For now it holds what JASS has: types,
-//! natives, globals and functions; libraries, structs and methods come
-//! with vJASS and Zinc, as items of their own, so an output that has
-//! classes (AngelScript) gets them as they are.
+//! is made from (see the README): what JASS has (types, natives, globals,
+//! functions) and what vJASS and Zinc add, as items of their own
+//! (libraries and scopes, structs with fields and methods, interfaces,
+//! modules), so an output that has classes (AngelScript) gets them as
+//! they are; only the JASS output lowers them. A name inside a library is
+//! kept as it's written there ([`Owner`] says whose it is); `a.b` and
+//! `a.b()` are kept as they are, for what `a` is takes the types to know.
+//! Each language's own forms that the game's JASS has too are made into
+//! those (Zinc's `while`, `for`, `+=` into `loop`, `exitwhen`, `set`).
 //!
 //! Each item knows where it was written ([`Origin`]), for the errors of a
 //! build. A literal is kept as it was written (`'hfoo'`, `$FF`, `.5`), so
@@ -23,12 +28,145 @@ pub struct Module {
     pub natives: Vec<Native>,
     pub globals: Vec<Global>,
     pub functions: Vec<Function>,
+    /// Libraries and scopes, in the order they were written (a scope in
+    /// a library after it).
+    pub libraries: Vec<Library>,
+    pub structs: Vec<Struct>,
+    pub interfaces: Vec<Interface>,
+    /// vJASS's and Zinc's modules: members a struct takes in where it
+    /// names one (`implement`, Zinc's `module M;`).
+    pub mixins: Vec<Mixin>,
+    /// vJASS's function interfaces: types of functions.
+    pub function_types: Vec<FunctionType>,
+}
+
+/// vJASS's `function interface F takes ... returns ...`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionType {
+    pub sig: Signature,
+    pub owner: Owner,
+    pub origin: Origin,
+}
+
+/// Who an item is: the library or scope it's in, and who sees it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Owner {
+    /// The library or scope (a scope in a scope: the innermost), none at
+    /// the top.
+    pub scope: Option<String>,
+    pub access: Access,
+}
+
+/// Who sees an item of a library or scope.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Access {
+    /// Everyone, by its name as written (vJASS's default; Zinc's
+    /// `public`; anything outside a library).
+    #[default]
+    Everyone,
+    /// vJASS's `public`: its scope by its name, everyone else as
+    /// `Scope_name`.
+    Public,
+    /// Its scope only (vJASS's `private`; Zinc's default).
+    Private,
+}
+
+/// A library or a scope.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Library {
+    pub name: String,
+    /// A scope (vJASS's `scope`): no `requires`, and it may be in a
+    /// library or another scope.
+    pub scope: bool,
+    /// The library or scope it's in.
+    pub parent: Option<String>,
+    /// What it needs before it: the name, and whether only if it's there
+    /// (`optional`).
+    pub requires: Vec<(String, bool)>,
+    /// The function run at map initialization (`initializer f`; Zinc's
+    /// `onInit`), as named in it.
+    pub initializer: Option<String>,
+    pub origin: Origin,
+}
+
+/// A struct: its fields and methods. `this` and `thistype` in a method are
+/// the instance and the struct.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Struct {
+    pub name: String,
+    pub owner: Owner,
+    /// `array`, a struct or an interface.
+    pub extends: Option<String>,
+    /// How many instances (`struct S[20000]`), as written.
+    pub size: Option<Expr>,
+    pub fields: Vec<Field>,
+    pub methods: Vec<Method>,
+    /// The modules it takes in, and whether only if they're there.
+    pub mixins: Vec<(String, bool)>,
+    pub origin: Origin,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Field {
+    pub name: String,
+    pub ty: String,
+    /// An array of the instance or of the struct; its size as written.
+    pub array: Option<Option<Expr>>,
+    pub is_static: bool,
+    pub constant: bool,
+    /// Set only inside the struct.
+    pub readonly: bool,
+    /// Its members are the struct's too (`delegate`).
+    pub delegate: bool,
+    pub private: bool,
+    pub init: Option<Expr>,
+    pub origin: Origin,
+}
+
+/// A method: a function with `this` (but a static one), named as written
+/// (an operator `operator []`, `operator x=`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Method {
+    pub function: Function,
+    pub is_static: bool,
+    /// A child may have its own (`stub`).
+    pub stub: bool,
+    pub private: bool,
+    /// An interface's that has no body: its signature only.
+    pub abstract_: bool,
+    /// An interface's: what it returns when a struct has none of its own
+    /// (`defaults`).
+    pub defaults: Option<Expr>,
+}
+
+/// An interface: the methods a struct extending it has.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Interface {
+    pub name: String,
+    pub owner: Owner,
+    pub methods: Vec<Method>,
+    pub origin: Origin,
+}
+
+/// A module: fields and methods a struct takes in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mixin {
+    pub name: String,
+    pub owner: Owner,
+    pub fields: Vec<Field>,
+    pub methods: Vec<Method>,
+    pub mixins: Vec<(String, bool)>,
+    pub origin: Origin,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeDef {
     pub name: String,
     pub extends: String,
+    /// A dynamic array type (`type T extends integer array [16]`): its
+    /// size, as written.
+    pub size: Option<Expr>,
+    pub owner: Owner,
     pub origin: Origin,
 }
 
@@ -60,6 +198,7 @@ pub struct Global {
     pub array: bool,
     pub constant: bool,
     pub init: Option<Expr>,
+    pub owner: Owner,
     pub origin: Origin,
 }
 
@@ -67,6 +206,7 @@ pub struct Global {
 pub struct Function {
     pub sig: Signature,
     pub body: Vec<Stmt>,
+    pub owner: Owner,
     pub origin: Origin,
 }
 
@@ -82,10 +222,26 @@ pub enum Stmt {
     Return { value: Option<Expr>, line: usize },
     /// Run only in debug mode: a `Set`, `Call`, `If` or `Loop`.
     Debug { stmt: Box<Stmt>, line: usize },
+    /// `object.name = value` (`object.name[index]`): a field of an
+    /// instance, or of a struct (`Data.count`).
+    SetMember { object: Expr, name: String, index: Option<Expr>, value: Expr, line: usize },
+    /// `object.name(args)`: a method, of an instance or a struct.
+    CallMethod { call: MethodCall, line: usize },
+    /// `static if`: a branch kept or dropped by constants when built.
+    StaticIf { cond: Expr, then: Vec<Stmt>, otherwise: Option<Vec<Stmt>>, line: usize },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Call {
+    pub name: String,
+    pub args: Vec<Expr>,
+}
+
+/// `object.name(args)`: `object` an instance, a struct (`Data.create`)
+/// or a function (`F.evaluate`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MethodCall {
+    pub object: Expr,
     pub name: String,
     pub args: Vec<Expr>,
 }
@@ -101,6 +257,13 @@ pub enum Expr {
     Code(String),
     Unary(UnaryOp, Box<Expr>),
     Binary(Box<Expr>, BinOp, Box<Expr>),
+    /// `object.name`: a field, of an instance or a struct; `this` and
+    /// `thistype` are names (`Var`).
+    Member(Box<Expr>, String),
+    /// `object.name(args)`.
+    Method(Box<MethodCall>),
+    /// An element of what isn't a name (`this.list[i]`).
+    Element(Box<Expr>, Box<Expr>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +287,8 @@ pub enum BinOp {
     LtEq,
     And,
     Or,
+    /// An integer's remainder (Zinc's `%`).
+    Mod,
 }
 
 /// A problem that stops a build: where, and what.
@@ -151,6 +316,15 @@ pub fn each_expr(body: &[Stmt], f: &mut impl FnMut(&Expr)) {
                 expr(a, f);
                 expr(b, f);
             }
+            Expr::Member(x, _) => expr(x, f),
+            Expr::Method(m) => {
+                expr(&m.object, f);
+                m.args.iter().for_each(|a| expr(a, f));
+            }
+            Expr::Element(a, i) => {
+                expr(a, f);
+                expr(i, f);
+            }
             Expr::Literal(_) | Expr::Var(_) | Expr::Code(_) => {}
         }
     }
@@ -175,6 +349,50 @@ pub fn each_expr(body: &[Stmt], f: &mut impl FnMut(&Expr)) {
             Stmt::ExitWhen { cond, .. } => expr(cond, f),
             Stmt::Return { value, .. } => value.iter().for_each(|e| expr(e, f)),
             Stmt::Debug { stmt, .. } => each_expr(std::slice::from_ref(stmt), f),
+            Stmt::SetMember { object, index, value, .. } => {
+                expr(object, f);
+                index.iter().for_each(|e| expr(e, f));
+                expr(value, f);
+            }
+            Stmt::CallMethod { call, .. } => {
+                expr(&call.object, f);
+                call.args.iter().for_each(|a| expr(a, f));
+            }
+            Stmt::StaticIf { cond, then, otherwise, .. } => {
+                expr(cond, f);
+                each_expr(then, f);
+                if let Some(b) = otherwise {
+                    each_expr(b, f);
+                }
+            }
+        }
+    }
+}
+
+impl Expr {
+    /// The expressions directly in this one, to change them.
+    pub fn children_mut(&mut self) -> Vec<&mut Expr> {
+        match self {
+            Expr::Index(_, i) => vec![&mut **i],
+            Expr::Call(c) => c.args.iter_mut().collect(),
+            Expr::Unary(_, x) | Expr::Member(x, _) => vec![&mut **x],
+            Expr::Binary(a, _, b) | Expr::Element(a, b) => vec![&mut **a, &mut **b],
+            Expr::Method(m) => std::iter::once(&mut m.object).chain(m.args.iter_mut()).collect(),
+            Expr::Literal(_) | Expr::Var(_) | Expr::Code(_) => Vec::new(),
+        }
+    }
+}
+
+impl Stmt {
+    /// A statement of vJASS's or Zinc's (`SetMember`, `CallMethod`,
+    /// `StaticIf`): its expressions and its bodies, to change them; none
+    /// for any other.
+    pub fn oop_parts_mut(&mut self) -> (Vec<&mut Expr>, Vec<&mut Vec<Stmt>>) {
+        match self {
+            Stmt::SetMember { object, index, value, .. } => (std::iter::once(object).chain(index.as_mut()).chain(std::iter::once(value)).collect(), Vec::new()),
+            Stmt::CallMethod { call, .. } => (std::iter::once(&mut call.object).chain(call.args.iter_mut()).collect(), Vec::new()),
+            Stmt::StaticIf { cond, then, otherwise, .. } => (vec![cond], std::iter::once(then).chain(otherwise.as_mut()).collect()),
+            _ => (Vec::new(), Vec::new()),
         }
     }
 }
@@ -195,6 +413,12 @@ pub fn called(body: &[Stmt]) -> Vec<String> {
                 }
                 Stmt::Loop { body, .. } => statements(body, out),
                 Stmt::Debug { stmt, .. } => statements(std::slice::from_ref(stmt), out),
+                Stmt::StaticIf { then, otherwise, .. } => {
+                    statements(then, out);
+                    if let Some(b) = otherwise {
+                        statements(b, out);
+                    }
+                }
                 _ => {}
             }
         }
@@ -302,14 +526,14 @@ impl Stmt {
 impl Function {
     /// A function taking and returning nothing, made where `origin` says.
     pub fn new(name: impl Into<String>, body: Vec<Stmt>, origin: Origin) -> Function {
-        Function { sig: Signature { name: name.into(), params: Vec::new(), returns: None, constant: false }, body, origin }
+        Function { sig: Signature { name: name.into(), params: Vec::new(), returns: None, constant: false }, body, owner: Owner::default(), origin }
     }
 }
 
 impl Global {
     /// A variable, of `ty`, set to `init` where the game reads globals.
     pub fn new(name: impl Into<String>, ty: impl Into<String>, init: Option<Expr>, origin: Origin) -> Global {
-        Global { name: name.into(), ty: ty.into(), array: false, constant: false, init, origin }
+        Global { name: name.into(), ty: ty.into(), array: false, constant: false, init, owner: Owner::default(), origin }
     }
 }
 
@@ -327,5 +551,65 @@ impl Module {
         self.natives.extend(other.natives);
         self.globals.extend(other.globals);
         self.functions.extend(other.functions);
+        self.libraries.extend(other.libraries);
+        self.structs.extend(other.structs);
+        self.interfaces.extend(other.interfaces);
+        self.mixins.extend(other.mixins);
+        self.function_types.extend(other.function_types);
+    }
+
+    /// What of vJASS and Zinc the module still has, which only lowering
+    /// (the build's stage 4) turns into the game's JASS: an error each.
+    pub fn not_lowered(&self) -> Vec<Error> {
+        let mut out = Vec::new();
+        let mut push = |origin: &Origin, what: String| out.push(Error { origin: origin.clone(), message: format!("{what} isn't built into JASS yet") });
+        for l in &self.libraries {
+            push(&l.origin, format!("{} {}", if l.scope { "scope" } else { "library" }, l.name));
+        }
+        for s in &self.structs {
+            push(&s.origin, format!("struct {}", s.name));
+        }
+        for i in &self.interfaces {
+            push(&i.origin, format!("interface {}", i.name));
+        }
+        for x in &self.mixins {
+            push(&x.origin, format!("module {}", x.name));
+        }
+        for t in &self.function_types {
+            push(&t.origin, format!("function interface {}", t.sig.name));
+        }
+        for t in self.types.iter().filter(|t| t.size.is_some()) {
+            push(&t.origin, format!("dynamic array type {}", t.name));
+        }
+        for f in &self.functions {
+            let mut what = None;
+            each_expr(&f.body, &mut |e| match e {
+                Expr::Member(..) | Expr::Method(_) | Expr::Element(..) => what = what.take().or(Some("a member (`a.b`)")),
+                Expr::Binary(_, BinOp::Mod, _) => what = what.take().or(Some("`%`")),
+                _ => {}
+            });
+            fn statements(body: &[Stmt], what: &mut Option<&'static str>) {
+                for s in body {
+                    match s {
+                        Stmt::SetMember { .. } | Stmt::CallMethod { .. } => *what = what.take().or(Some("a member (`a.b`)")),
+                        Stmt::StaticIf { .. } => *what = what.take().or(Some("`static if`")),
+                        Stmt::If { branches, otherwise, .. } => {
+                            branches.iter().for_each(|(_, b)| statements(b, what));
+                            if let Some(b) = otherwise {
+                                statements(b, what);
+                            }
+                        }
+                        Stmt::Loop { body, .. } => statements(body, what),
+                        Stmt::Debug { stmt, .. } => statements(std::slice::from_ref(stmt), what),
+                        _ => {}
+                    }
+                }
+            }
+            statements(&f.body, &mut what);
+            if let Some(w) = what {
+                push(&f.origin, format!("{w} in {}", f.sig.name));
+            }
+        }
+        out
     }
 }

@@ -32,6 +32,9 @@ fn expr(e: &Expr) -> String {
         },
         Expr::Unary(op, x) => format!("{op:?} {}", expr(x)),
         Expr::Binary(a, op, b) => format!("{} {op:?} {}", expr(a), expr(b)),
+        Expr::Member(x, n) => format!("{}.{n}", expr(x)),
+        Expr::Method(m) => format!("{}.{}({})", expr(&m.object), m.name, m.args.iter().map(expr).collect::<Vec<_>>().join(", ")),
+        Expr::Element(a, i) => format!("{}[{}]", expr(a), expr(i)),
     }
 }
 
@@ -64,7 +67,9 @@ fn statements(f: &Function) -> Vec<String> {
 /// What World Editor makes of the map's placed things.
 fn made_by_map(name: &str) -> bool {
     (name.starts_with("Create") && !name.starts_with("Create_"))
-        || name.ends_with("_DropItems")
+        || ["Unit", "Doodad", "ItemTable"].iter().any(|k| {
+            name.strip_prefix(k).and_then(|r| r.strip_suffix("_DropItems")).is_some_and(|n| n.len() == 6 && n.bytes().all(|b| b.is_ascii_digit()))
+        })
         || ["InitUpgrades", "InitTechTree", "InitRandomGroups"].iter().any(|p| name.starts_with(p))
 }
 
@@ -277,7 +282,11 @@ fn compare(ours: &Module, theirs: &Module, map: &Map) -> (Vec<String>, usize) {
     if map.variables.is_empty() {
         later.push("InitGlobals(");
     }
-    let keep = |c: &String| !later.iter().any(|p| c.starts_with(p));
+    // The map's code's own (vJASS initializers JassHelper calls in `main`):
+    // not the map's part.
+    let parts = ["config", "main", "InitCustomPlayerSlots", "InitCustomTeams", "InitAllyPriorities", "InitSounds", "CreateRegions", "CreateCameras", "InitGlobals", "InitCustomTriggers", "RunInitializationTriggers"];
+    let code: std::collections::HashSet<&str> = theirs.functions.iter().map(|f| f.sig.name.as_str()).filter(|n| !made_by_map(n) && !parts.contains(n)).collect();
+    let keep = |c: &String| !later.iter().any(|p| c.starts_with(p)) && !code.contains(c.split('(').next().unwrap_or(""));
     let mut names = vec!["config", "InitCustomPlayerSlots", "InitCustomTeams", "InitAllyPriorities", "InitSounds", "CreateRegions", "CreateCameras", "main"];
     if !map.variables.is_empty() {
         names.push("InitGlobals");
@@ -333,12 +342,54 @@ fn the_whole_main_as_world_editors() {
     let dir = PathBuf::from(triggers);
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "j")).collect();
     files.sort();
+    // The map's code (`MAP_CODE`: its war3map.wct as files, vJASS ...),
+    // with the triggers.
+    if let Some(code) = std::env::var_os("MAP_CODE") {
+        files.extend(std::env::split_paths(&code));
+    }
     let texts: Vec<(String, String)> = files.iter().map(|p| (p.to_string_lossy().into_owned(), read(p))).collect();
     let sources: Vec<Source> = texts.iter().map(|(n, t)| Source { name: n, text: t }).collect();
     let mut whole = start;
     whole.append(module(&sources).unwrap_or_else(|e| panic!("{:?}", &e[..e.len().min(5)])));
     whole.append(wc3_build::map::end(&map));
     let built = wc3_build::jass::build(&whole).unwrap_or_else(|e| panic!("{:?}", &e[..e.len().min(5)]));
+    if let Some(out) = std::env::var_os("BUILT_OUT") {
+        std::fs::write(out, &built).unwrap();
+    }
+    // With the game's scripts (`JASS_GAME`, folders with common.j and
+    // Blizzard.j): no problem of names, types or the game's grammar World
+    // Editor's script hasn't too.
+    if let Some(game) = std::env::var_os("JASS_GAME") {
+        let folders: Vec<PathBuf> = std::env::split_paths(&game).collect();
+        let mut env = jass_rs::names::Declarations::default();
+        for name in ["common.j", "Blizzard.j"] {
+            let p = folders.iter().rev().map(|g| g.join(name)).find(|p| p.is_file()).unwrap_or_else(|| panic!("no {name}"));
+            env.extend(&jass_rs::names::Declarations::of(&jass_rs::parse(&read(&p)).unwrap()));
+        }
+        let problems = |text: &str| -> Vec<String> {
+            let program = jass_rs::parse(text).unwrap_or_else(|e| panic!("line {}: {}", e.line, e.message));
+            let mut out: Vec<String> = jass_rs::names::check(&program, &[&env]).into_iter().map(|d| format!("{}: {}", d.rule, d.message)).collect();
+            out.extend(
+                jass_rs::lint(&program)
+                    .into_iter()
+                    .filter(|d| parser_rs::find_rule(d.rule).is_some_and(|r| r.groups.contains(&parser_rs::group::PURE)) || d.rule == parser_rs::rule::DUPLICATE_DECLARATION)
+                    .map(|d| format!("{}: {}", d.rule, d.message)),
+            );
+            out
+        };
+        let (ours, theirs) = (problems(&built), problems(&read(&PathBuf::from(std::env::var_os("MAP").unwrap()).join("war3map.j"))));
+        let only_ours: Vec<&String> = ours.iter().filter(|p| !theirs.contains(p)).collect();
+        println!("problems: {} of ours, {} of World Editor's script; ours only: {}", ours.len(), theirs.len(), only_ours.len());
+        let mut kinds: std::collections::BTreeMap<String, usize> = Default::default();
+        for p in &only_ours {
+            let k: String = p.split(" of '").next().unwrap_or(p).to_string() + " '" + p.split('\'').nth(1).unwrap_or("") + "'";
+            *kinds.entry(k).or_default() += 1;
+        }
+        for (k, n) in kinds.iter().take(30) {
+            println!("  {n} x {k}");
+        }
+        assert!(only_ours.is_empty());
+    }
     let ours = module(&[Source { name: "built", text: &built }]).unwrap();
     fn flat(m: &Module, name: &str, inline: &dyn Fn(&str) -> bool, out: &mut Vec<String>) {
         let Some(f) = m.functions.iter().find(|f| f.sig.name == name) else { return };
@@ -363,7 +414,10 @@ fn the_whole_main_as_world_editors() {
     println!("main: {} of ours, {} of World Editor's ({} lines built)", a.len(), b.len(), built.lines().count());
     let trigger = |c: &String| c.contains("gg_trg_");
     let (pa, pb) = (a.iter().position(trigger).unwrap_or(a.len()), b.iter().position(trigger).unwrap_or(b.len()));
-    assert_eq!(a[..pa], b[..pb], "the map's setting up");
+    if a[..pa] != b[..pb] {
+        let first = a[..pa].iter().zip(&b[..pb]).position(|(x, y)| x != y).unwrap_or(pa.min(pb));
+        panic!("the map's setting up, first difference at {first}:\n  ours:   {:?}\n  theirs: {:?}", a.get(first..(first + 3).min(pa)), b.get(first..(first + 3).min(pb)));
+    }
     let by_trigger = |calls: &[String]| {
         let mut m: std::collections::BTreeMap<String, Vec<String>> = Default::default();
         for c in calls {
@@ -378,6 +432,12 @@ fn the_whole_main_as_world_editors() {
     let differ: Vec<String> = tb.iter().filter(|(k, v)| ta.get(*k) != Some(v)).map(|(k, v)| format!("{k}:\n  ours:   {:?}\n  theirs: {v:?}", ta.get(k))).collect();
     let extra: Vec<&String> = ta.keys().filter(|k| !tb.contains_key(*k)).collect();
     println!("{} triggers set up alike, {} differ, {} only ours", tb.len() - differ.len(), differ.len(), extra.len());
+    // What's past the setting up and of no trigger, each side's.
+    let loose = |calls: &[String]| calls.iter().filter(|c| !trigger(c)).cloned().collect::<Vec<_>>();
+    let (la, lb) = (loose(&a[pa..]), loose(&b[pb..]));
+    if la != lb {
+        println!("of no trigger:\n  ours:   {la:?}\n  theirs: {lb:?}");
+    }
     for d in differ.iter().take(8) {
         println!("{d}");
     }

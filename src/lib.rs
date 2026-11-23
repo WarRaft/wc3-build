@@ -3,11 +3,14 @@
 
 pub mod audio;
 pub mod from_jass;
+pub mod from_zinc;
 pub mod ir;
 pub mod jass;
+pub mod lower;
 pub mod map;
 pub mod objects;
 pub mod placed;
+pub mod structs;
 pub mod tables;
 pub mod uglify;
 
