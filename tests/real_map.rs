@@ -61,6 +61,11 @@ fn statements(f: &Function) -> Vec<String> {
     out
 }
 
+/// What World Editor makes of the map's placed things.
+fn made_by_map(name: &str) -> bool {
+    (name.starts_with("Create") && !name.starts_with("Create_")) || name.ends_with("_DropItems")
+}
+
 /// The map's part, made of the files at `MAP`, and World Editor's script.
 fn made() -> Option<(Module, Module, Map<'static>, GameData)> {
     let dir = PathBuf::from(std::env::var_os("MAP")?);
@@ -112,11 +117,65 @@ fn made() -> Option<(Module, Module, Map<'static>, GameData)> {
         let rel = f.replace('\\', "/");
         roots.iter().map(|r| r.join(&rel)).find(|p| p.is_file()).and_then(|p| wc3_build::audio::duration_ms(&std::fs::read(p).ok()?))
     }));
-    let map = Map { info, variables: Box::leak(variables.into_boxed_slice()), initialization: Box::leak(init.into_boxed_slice()), regions, cameras, sounds, duration };
-    let ours = wc3_build::map::start(&map, &game).unwrap_or_else(|e| panic!("{e:?}"));
     let theirs_text = read(&dir.join("war3map.j"));
     let theirs = module(&[Source { name: "war3map.j", text: &theirs_text }]).unwrap();
+    // The names the code uses: World Editor's script but what the map's
+    // part makes.
+    let code = Module { functions: theirs.functions.iter().filter(|f| !made_by_map(&f.sig.name)).cloned().collect(), ..Default::default() };
+    let used: &'static _ = Box::leak(Box::new(wc3_build::map::used_names(&code)));
+    // What the types are: the game's tables (`Units` next to each `UI`),
+    // then the map's object data.
+    let mut objects = wc3_build::objects::Objects::default();
+    for d in &ui {
+        let units = d.parent().unwrap().join("Units");
+        for e in std::fs::read_dir(&units).into_iter().flatten().flatten() {
+            let n = e.file_name().to_string_lossy().to_lowercase();
+            if ["unitbalance.slk", "unitui.slk", "itemdata.slk", "abilitydata.slk"].contains(&n.as_str()) {
+                objects.add_table(&read(&e.path()));
+            } else if n.ends_with("abilityfunc.txt") {
+                objects.add_ability_func(&read(&e.path()));
+            }
+        }
+    }
+    for (name, kind) in [("war3map.w3u", w3abdhqtu_rs::Kind::Unit), ("war3map.w3t", w3abdhqtu_rs::Kind::Item), ("war3map.w3a", w3abdhqtu_rs::Kind::Ability)] {
+        if let Some(b) = file(name) {
+            objects.add_object_data(&w3abdhqtu_rs::parse(&b, kind).unwrap());
+        }
+    }
+    let objects: &'static _ = Box::leak(Box::new(objects));
+    let doodads = file("war3map.doo").map(|b| &*Box::leak(Box::new(doo_rs::parse_doodads_any(&b).unwrap())));
+    let units = file("war3mapUnits.doo").map(|b| &*Box::leak(Box::new(doo_rs::parse_units_any(&b).unwrap())));
+    let map = Map {
+        info,
+        variables: Box::leak(variables.into_boxed_slice()),
+        initialization: Box::leak(init.into_boxed_slice()),
+        regions,
+        cameras,
+        sounds,
+        duration,
+        doodads,
+        units,
+        objects,
+        used,
+    };
+    let ours = wc3_build::map::start(&map, &game).unwrap_or_else(|e| panic!("{e:?}"));
     Some((ours, theirs, map, game))
+}
+
+/// Statements as groups each from a `Create...` on, sorted.
+fn grouped(v: Vec<String>) -> Vec<String> {
+    let mut groups: Vec<String> = Vec::new();
+    for s in v {
+        match groups.last_mut() {
+            Some(g) if !s.contains("Create") || s.contains("CreateTrigger") => {
+                g.push_str(" ; ");
+                g.push_str(&s);
+            }
+            _ => groups.push(s),
+        }
+    }
+    groups.sort();
+    groups
 }
 
 #[test]
@@ -125,23 +184,35 @@ fn the_maps_part_as_world_editors() {
     let Some((ours, theirs, map, _)) = made() else { return };
     let find = |m: &Module, name: &str| m.functions.iter().find(|f| f.sig.name == name).map(statements);
     // main: the map's setting up; what makes things not made yet left out.
-    let later = ["CreateAllDestructables(", "CreateAllItems(", "CreateAllUnits(", "InitCustomTriggers(", "RunInitializationTriggers(", "InitUpgrades(", "InitTechTree(", "InitRandomGroups(", "InitMapItemTables("];
+    let later = ["InitCustomTriggers(", "RunInitializationTriggers(", "InitUpgrades(", "InitTechTree(", "InitRandomGroups(", "InitMapItemTables("];
     let keep = |c: &String| !later.iter().any(|p| c.starts_with(p));
     let mut names = vec!["config", "InitCustomPlayerSlots", "InitCustomTeams", "InitAllyPriorities", "InitSounds", "CreateRegions", "CreateCameras", "main"];
     if !map.variables.is_empty() {
         names.push("InitGlobals");
     }
+    // What's placed: every function World Editor's makes; the
+    // destructables in any order (World Editor's, within a type, is its
+    // own), each with the lines that follow it.
+    let placed: Vec<&str> = theirs.functions.iter().map(|f| f.sig.name.as_str()).filter(|n| made_by_map(n) && !names.contains(n) && *n != "CreateRegions" && *n != "CreateCameras").collect();
+    let ours_placed: Vec<&str> = ours.functions.iter().map(|f| f.sig.name.as_str()).filter(|n| made_by_map(n) && !names.contains(n) && *n != "CreateRegions" && *n != "CreateCameras").collect();
+    let only_ours: Vec<&&str> = ours_placed.iter().filter(|n| !placed.contains(n)).collect();
+    println!("placed: {} functions of World Editor's; only ours: {only_ours:?}", placed.len());
+    names.extend(placed);
+    let mut differ = Vec::new();
     for name in names {
         let (a, b) = (find(&ours, name).map(|v| v.into_iter().filter(keep).collect::<Vec<_>>()), find(&theirs, name).map(|v| v.into_iter().filter(keep).collect::<Vec<_>>()));
         println!("{name}: {} of ours, {} of World Editor's", a.as_ref().map_or(0, Vec::len), b.as_ref().map_or(0, Vec::len));
         let near = |x: &String, y: &String| x == y;
+        let (a, b) = if name == "CreateAllDestructables" || name == "CreateAllItems" { (a.map(grouped), b.map(grouped)) } else { (a, b) };
         let alike = a == b;
         if !alike {
             let (a, b) = (a.unwrap_or_default(), b.unwrap_or_default());
             let first = a.iter().zip(&b).position(|(x, y)| !near(x, y)).unwrap_or(a.len().min(b.len()));
-            panic!("{name}: first difference at {first}:\n ours:   {:?}\n theirs: {:?}", a.get(first..(first + 3).min(a.len())), b.get(first..(first + 3).min(b.len())));
+            println!("  first difference at {first}:\n   ours:   {:?}\n   theirs: {:?}", a.get(first..(first + 3).min(a.len())), b.get(first..(first + 3).min(b.len())));
+            differ.push(name);
         }
     }
+    assert!(differ.is_empty() && only_ours.is_empty(), "differ: {differ:?}");
 }
 
 /// The whole map built (the map's part, the triggers, the map's end), and
@@ -177,7 +248,7 @@ fn the_whole_main_as_world_editors() {
         }
     }
     let inline = |n: &str| n == "InitCustomTriggers" || n.starts_with("InitTrig_") || n == "RunInitializationTriggers";
-    let later = ["CreateAllDestructables(", "CreateAllItems(", "CreateAllUnits("];
+    let later: [&str; 0] = [];
     let (mut a, mut b) = (Vec::new(), Vec::new());
     flat(&ours, "main", &inline, &mut a);
     flat(&theirs, "main", &inline, &mut b);

@@ -6,6 +6,8 @@ pub mod from_jass;
 pub mod ir;
 pub mod jass;
 pub mod map;
+pub mod objects;
+pub mod placed;
 pub mod uglify;
 
 /// The game's JASS of `files` (this toolchain's JASS, or the game's), in

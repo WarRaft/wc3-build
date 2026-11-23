@@ -56,8 +56,10 @@ files or a folder.
     is set), sound environment (the tileset's when none), ambient sounds,
     music, then `InitSounds` (`war3map.w3s`), `CreateRegions`
     (`war3map.w3r`, each with its weather and its sound), `CreateCameras`
-    (`war3map.w3c`), `InitBlizzard` and `InitGlobals`. The triggers'
-    `main`s follow (World Editor's `InitCustomTriggers`).
+    (`war3map.w3c`), what's placed (`CreateAllDestructables`,
+    `CreateAllItems`, `CreateAllUnits`: `placed`), `InitBlizzard` and
+    `InitGlobals`. The triggers' `main`s follow (World Editor's
+    `InitCustomTriggers`).
   - `end`: `RunInitializationTriggers`, the triggers of map
     initialization run once every `main` has.
 
@@ -67,12 +69,53 @@ files or a folder.
   environment (`UI\WorldEditData.txt`), the labels of the game's sounds
   (`UI\SoundInfo\*.slk`, by their files). The triggers' variables and
   which triggers run at initialization are `wtg-rs`'s
-  (`jass::map_variable`, `jass::initialization_triggers`). What's placed
-  (units, items, destructables) comes next.
+  (`jass::map_variable`, `jass::initialization_triggers`). Random groups
+  and item tables, upgrades and the tech tree come next.
   - Sounds: music is a string, its file; any other is made
     (`CreateSound`), with its label's settings when it's one of the
     game's (`SetSoundParamsFromLabel`), how long it plays, and each
     setting the file gives rather than World Editor's "default".
+- **`placed`**: what `war3map.doo` and `war3mapUnits.doo` place, as
+  World Editor's script makes it. A thing is named (`gg_dest_B000_0261`,
+  `gg_unit_hfoo_0012`, `gg_item_ratc_0003`: type and number) only when
+  the rest of the code uses that name (`map::used_names`); else it's a
+  local, or isn't kept.
+  - Destructables: those the game doesn't make (the file's flag 2 clear:
+    World Editor clears it for those its script makes) and those the
+    code names; the named first, by type. `CreateDestructableZ` with the
+    flag "fixed height" (4), `CreateDeadDestructable` with no life, part
+    of its life set (`0.10 * life`).
+  - Items: `CreateItem`, by type.
+  - Units: a function each for each owner's buildings and units
+    (`CreateBuildingsForPlayer7`, `CreateUnitsForPlayer11`,
+    `CreateNeutralHostile(Buildings)`, `CreateNeutralPassive(Buildings)`;
+    the neutral owners are 12 and 15, or 24 and 27 from 1.29), by their
+    numbers; `CreatePlayerBuildings` and `CreatePlayerUnits` even when
+    empty. On each: a hero's level and attributes, life, mana, gold, its
+    team color (the type's, unless the file gives one), acquisition
+    range (200 for "camp"), each hero ability chosen as many times as its
+    level, the order that turns each ability's autocast on or off,
+    inventory, a waygate's destination.
+  - What something drops when it dies: a trigger on its death (a unit's
+    change of owner too) and `<Doodad|Unit><its place in the file>_DropItems`,
+    one item of each set that has any (a set short of 100% may drop none,
+    `-1`; a random item `YlI1` is `ChooseRandomItemEx(ITEM_TYPE_ARTIFACT, 1)`).
+
+  Within a type, World Editor's order of destructables and items is its
+  own (neither their numbers nor their places in the file); ours is the
+  file's. What hasn't been seen in a map yet, and is made as World Editor
+  is known to: a hero's attributes, life, gold, a placed color,
+  inventory, waygates. Random units and items, and drops from the map's
+  item tables, are errors until random tables are built.
+- **`objects`**: what `placed` needs of the types, read as World Editor
+  reads it: the game's tables (`UnitBalance.slk` `isbldg`, `unitUI.slk`
+  `teamColor`, `ItemData.slk`, `AbilityData.slk` `hero`,
+  `*AbilityFunc.txt` `Orderon`/`Orderoff`), then the map's object data,
+  a custom object taking its standard one's. World Editor's quirks: a
+  custom ability's order is always written, `""` when its standard one
+  has none (a standard ability with none gets no call); an item above
+  level 10 in a set of drops is written as none (`-1`; seen once, an
+  item of level 50).
 - **`uglify`**: shorter names, on the finished tree (`jass::Options`'s
   `uglify`, `jass::build_with`): every name the module declares that the
   game doesn't need as it is (its functions but `main` and `config`,
@@ -120,11 +163,17 @@ whole `main`, World Editor's `InitCustomTriggers` and `InitTrig_` read
 where they're called. The Castle and CruiserCommand: `config`, the
 players, the forces, the priorities and the setting up in `main` call
 what World Editor's do; The Castle's `InitGlobals` sets its 163 values as
-World Editor's does, and its whole `main`, 1472 calls, is World Editor's
+World Editor's does, and its whole `main` is World Editor's
 (every trigger set up alike; their order is the triggers' as they are,
 newer than its `war3map.j`). Its sounds (422 calls, 78 MP3 and 8 WAV
 durations), regions (338) and cameras (675), and CruiserCommand's, call
-and set what World Editor's do, none left out. The test takes `MAP`
-(the map's files), `WTG_TEXT`, `MAP_PATCH` (a project's
+and set what World Editor's do, none left out; so do the placed things
+of both, every function (The Castle: 108, with 96 that drop items;
+CruiserCommand: 40), the destructables and items as sets, and The
+Castle's whole `main` is 1475 calls. The test takes `MAP` (the map's
+files, with its object data), `WTG_TEXT`, `MAP_PATCH` (a project's
 `TriggerData.patch.txt`), `GAME_UI` (the layers' `UI` folders, lowest
-first, with `SoundInfo`), `GAME_FILES` (the game's sound files).
+first, with `SoundInfo`; the `Units` folder next to each gives the
+tables of `objects`), `GAME_FILES` (the game's sound files). The names
+the code uses are World Editor's script's, but for what the map's part
+makes.

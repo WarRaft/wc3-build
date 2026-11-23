@@ -8,8 +8,8 @@
 //!   `InitAllyPriorities`), and a `main` that sets the map up as World
 //!   Editor's does (camera bounds, day and night, fog, water, sound,
 //!   music), then what makes the map's things (`InitSounds`,
-//!   `CreateRegions` with their weather and sounds, `CreateCameras`),
-//!   `InitBlizzard` and
+//!   `CreateRegions` with their weather and sounds, `CreateCameras`,
+//!   what's placed: [`crate::placed`]), `InitBlizzard` and
 //!   `InitGlobals` (the triggers' variables). The triggers' `main`s come
 //!   after it (World Editor's `InitCustomTriggers`).
 //! - [`end`]: a `main` that runs the triggers of map initialization
@@ -141,6 +141,54 @@ pub struct Map<'a> {
     /// How long a sound file plays, in milliseconds (`audio::duration_ms`
     /// of it, wherever it's found: the map, the game): `None` when it isn't.
     pub duration: &'a dyn Fn(&str) -> Option<u32>,
+    /// What's placed (`war3map.doo`, `war3mapUnits.doo`).
+    pub doodads: Option<&'a doo_rs::Doodads>,
+    pub units: Option<&'a doo_rs::Units>,
+    /// What the placed things' types are (the game's and the map's object
+    /// data).
+    pub objects: &'a crate::objects::Objects,
+    /// The names the rest of the code uses ([`used_names`]): a placed
+    /// thing is named (`gg_unit_hfoo_0012`) only when it's one.
+    pub used: &'a std::collections::HashSet<String>,
+}
+
+/// Every name a module's functions and globals use.
+pub fn used_names(m: &Module) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let mut name = |e: &Expr| {
+        if let Expr::Var(n) | Expr::Code(n) | Expr::Index(n, _) = e {
+            out.insert(n.clone());
+        }
+    };
+    for f in &m.functions {
+        each_expr(&f.body, &mut name);
+    }
+    let inits: Vec<Stmt> = m.globals.iter().filter_map(|g| g.init.clone()).map(|e| Stmt::Return { value: Some(e), line: 0 }).collect();
+    each_expr(&inits, &mut name);
+    for f in &m.functions {
+        collect_sets(&f.body, &mut out);
+    }
+    out
+}
+
+/// The names statements set.
+fn collect_sets(body: &[Stmt], out: &mut std::collections::HashSet<String>) {
+    for s in body {
+        match s {
+            Stmt::Set { name, .. } => {
+                out.insert(name.clone());
+            }
+            Stmt::If { branches, otherwise, .. } => {
+                branches.iter().for_each(|(_, b)| collect_sets(b, out));
+                if let Some(b) = otherwise {
+                    collect_sets(b, out);
+                }
+            }
+            Stmt::Loop { body, .. } => collect_sets(body, out),
+            Stmt::Debug { stmt, .. } => collect_sets(std::slice::from_ref(&**stmt), out),
+            _ => {}
+        }
+    }
 }
 
 const RACES: [&str; 5] = ["RACE_PREF_RANDOM", "RACE_PREF_HUMAN", "RACE_PREF_ORC", "RACE_PREF_UNDEAD", "RACE_PREF_NIGHTELF"];
@@ -214,6 +262,20 @@ pub fn start(map: &Map, game: &GameData) -> Result<Module, Vec<Error>> {
         m.globals.extend(globals);
         parts.push("CreateCameras");
     }
+    let made = crate::placed::make(&crate::placed::Placing {
+        doodads: map.doodads,
+        units: map.units,
+        objects: map.objects,
+        used: map.used,
+        regions: map.regions,
+        max_players: crate::placed::max_players(info),
+    });
+    if !made.errors.is_empty() {
+        return Err(made.errors);
+    }
+    m.functions.extend(made.functions);
+    m.globals.extend(made.globals);
+    parts.extend(made.calls);
 
     let mut main = setting_up(info, game);
     for p in parts {

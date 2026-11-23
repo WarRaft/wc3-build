@@ -16,7 +16,7 @@ fn game_data_from_its_files() {
 fn the_end_runs_the_initialization_triggers() {
     let info = Info::default();
     let init = ["gg_trg_A".to_string(), "gg_trg_B".to_string()];
-    let map = Map { info: &info, variables: &[], initialization: &init, regions: None, cameras: None, sounds: None, duration: &|_| None };
+    let map = Map { info: &info, variables: &[], initialization: &init, regions: None, cameras: None, sounds: None, duration: &|_| None, doodads: None, units: None, objects: &Default::default(), used: &Default::default() };
     let out = crate::jass::build(&end(&map)).unwrap();
     assert!(out.contains("function RunInitializationTriggers takes nothing returns nothing\n    call ConditionalTriggerExecute(gg_trg_A)\n    call ConditionalTriggerExecute(gg_trg_B)\nendfunction\n"), "{out}");
     assert!(out.ends_with("function main takes nothing returns nothing\n    call RunInitializationTriggers()\nendfunction\n"), "{out}");
@@ -33,7 +33,7 @@ fn regions_and_cameras() {
     let regions = w3r_rs::Regions { version: 5, regions: vec![rain, water] };
     let cam = w3c_rs::Camera::new("Cam 1", 10.25, 0.0);
     let cameras = w3c_rs::Cameras { version: 0, layout: w3c_rs::Layout::Classic, cameras: vec![cam] };
-    let map = Map { info: &info, variables: &[], initialization: &[], regions: Some(&regions), cameras: Some(&cameras), sounds: None, duration: &|_| None };
+    let map = Map { info: &info, variables: &[], initialization: &[], regions: Some(&regions), cameras: Some(&cameras), sounds: None, duration: &|_| None, doodads: None, units: None, objects: &Default::default(), used: &Default::default() };
     let out = crate::jass::build(&start(&map, &GameData::default()).unwrap()).unwrap();
     for part in [
         "    rect gg_rct_REG_Rain = null\n    rect gg_rct_Water = null\n    camerasetup gg_cam_Cam_1 = null\n",
@@ -75,7 +75,7 @@ fn sounds_as_world_editor_makes_them() {
     let sounds = w3s_rs::Sounds { version: 1, sounds: vec![music, click, voice] };
     let info = Info::default();
     let duration = |f: &str| f.ends_with("Voice.mp3").then_some(5010).or(f.ends_with("Click2.wav").then_some(476));
-    let map = Map { info: &info, variables: &[], initialization: &[], regions: None, cameras: None, sounds: Some(&sounds), duration: &duration };
+    let map = Map { info: &info, variables: &[], initialization: &[], regions: None, cameras: None, sounds: Some(&sounds), duration: &duration, doodads: None, units: None, objects: &Default::default(), used: &Default::default() };
     let out = crate::jass::build(&start(&map, &game).unwrap()).unwrap();
     for part in [
         "    string gg_snd_Theme\n    sound gg_snd_Click = null\n    sound gg_snd_Voice = null\n",

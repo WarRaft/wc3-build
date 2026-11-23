@@ -18,3 +18,5 @@ w3c-rs = { path = "../w3c-rs" }
 w3s-rs = { path = "../w3s-rs" }
 slk-rs = { path = "../slk-rs" }
 wtg-rs = { path = "../wtg-rs" }
+doo-rs = { path = "../doo-rs" }
+w3abdhqtu-rs = { path = "../w3abdhqtu-rs" }
