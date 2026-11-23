@@ -20,6 +20,8 @@ pub struct Objects {
     item_levels: HashMap<Rawcode, i32>,
     team_colors: HashMap<Rawcode, i32>,
     hero_abilities: HashSet<Rawcode>,
+    /// Unit types with the gold mine's ability (`Agld`).
+    gold_mines: HashSet<Rawcode>,
     /// The game's abilities' orders: on, off.
     orders: HashMap<Rawcode, (String, String)>,
     /// The map's custom abilities, by their standard ones: World Editor
@@ -36,10 +38,16 @@ pub enum Placed {
     Item,
 }
 
+/// Whether a list of abilities has the gold mine's.
+fn mines(list: &str) -> bool {
+    list.split(',').any(|a| a.trim() == "Agld")
+}
+
 impl Objects {
     /// A table of the game's (`.slk`): `Units\UnitBalance.slk` (`isbldg`),
     /// `Units\unitUI.slk` (`teamColor`), `Units\ItemData.slk` (its ids are
-    /// items'), `Units\AbilityData.slk` (`hero`); any other is left alone.
+    /// items'), `Units\UnitAbilities.slk` (`abilList`: gold mines),
+    /// `Units\AbilityData.slk` (`hero`); any other is left alone.
     /// Each row is its first column's id.
     pub fn add_table(&mut self, slk: &str) {
         let doc = slk_rs::parse(slk);
@@ -55,6 +63,18 @@ impl Objects {
                 for (r, id) in rows() {
                     if let Ok(v) = table.text(r, c).trim().parse() {
                         self.item_levels.insert(id, v);
+                    }
+                }
+            }
+            return;
+        }
+        if first.eq_ignore_ascii_case("unitAbilID") {
+            if let Some(c) = column("abilList") {
+                for (r, id) in rows() {
+                    if mines(&table.text(r, c)) {
+                        self.gold_mines.insert(id);
+                    } else {
+                        self.gold_mines.remove(&id);
                     }
                 }
             }
@@ -142,6 +162,16 @@ impl Objects {
                         if let Some(&c) = self.team_colors.get(&o.base) {
                             self.team_colors.insert(id, c);
                         }
+                        if self.gold_mines.contains(&o.base) {
+                            self.gold_mines.insert(id);
+                        }
+                    }
+                    if let Some(Value::Str(list)) = field(o, b"uabi") {
+                        if mines(&list) {
+                            self.gold_mines.insert(id);
+                        } else {
+                            self.gold_mines.remove(&id);
+                        }
                     }
                     if let Some(b) = int(field(o, b"ubdg")) {
                         if b != 0 {
@@ -200,6 +230,11 @@ impl Objects {
     /// items have.
     pub fn droppable(&self, item: Rawcode) -> bool {
         self.item_levels.get(&item).is_none_or(|&l| l <= 10)
+    }
+
+    /// Whether a unit type is a gold mine: World Editor sets its gold.
+    pub fn is_gold_mine(&self, unit: Rawcode) -> bool {
+        self.gold_mines.contains(&unit)
     }
 
     pub fn is_hero_ability(&self, ability: Rawcode) -> bool {

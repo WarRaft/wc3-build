@@ -42,10 +42,26 @@ fn what_is_placed() {
     let mut claws = Unit::new(r(b"ratc"), 5.0, 5.0, 15);
     claws.number = 9;
     let start_location = Unit::new(r(b"sloc"), 0.0, 0.0, 0);
-    let units = doo_rs::Units { version: 8, subversion: 11, layout: doo_rs::Layout::Classic, units: vec![paladin, footman, barracks, claws, start_location] };
+    // From the map's group numbered 5 (its first), column 1; dropping from
+    // item table 2.
+    let mut creep = Unit::new(r(b"uDNR"), 1.0, 1.0, 13);
+    creep.number = 6;
+    creep.random = Random::Group { group: 5, position: 1 };
+    creep.item_table = 2;
+    let mut mine = Unit::new(r(b"bDNR"), 2.0, 2.0, 15);
+    mine.number = 7;
+    mine.random = Random::Table(vec![(r(b"ngol"), 50), (r(b"ngme"), 50)]);
+    let units = doo_rs::Units {
+        version: 8,
+        subversion: 11,
+        layout: doo_rs::Layout::Classic,
+        units: vec![paladin, footman, barracks, claws, start_location, creep, mine],
+    };
 
     let used: HashSet<String> = ["gg_dest_LTg1_0003", "gg_unit_Hpal_0002"].map(String::from).into();
-    let info = w3i_rs::Info::default();
+    let mut info = w3i_rs::Info { version: 25, ..Default::default() };
+    info.unit_tables.push(w3i_rs::UnitTable { number: 5, name: "Creeps".into(), columns: vec![0, 0], rows: vec![(100, vec![r(b"nfrl"), r(b"nfrs")])] });
+    info.item_tables.push(w3i_rs::ItemTable { number: 2, name: "Drops".into(), sets: vec![vec![(100, r(b"YYI1"))]] });
     let map = Map {
         info: &info,
         variables: &[],
@@ -72,7 +88,12 @@ fn what_is_placed() {
         "    set gg_unit_Hpal_0002 = CreateUnit(p, 'Hpal', 10.0, 20.0, 0.000)\n    call SetHeroLevel(gg_unit_Hpal_0002, 3, false)\n    call SetUnitColor(gg_unit_Hpal_0002, ConvertPlayerColor(3))\n    call SelectHeroSkill(gg_unit_Hpal_0002, 'AHhb')\n    call SelectHeroSkill(gg_unit_Hpal_0002, 'AHhb')\n    call IssueImmediateOrder(gg_unit_Hpal_0002, \"healon\")\n    call UnitAddItemToSlotById(gg_unit_Hpal_0002, 'ratc', 0)\n",
         "function CreateNeutralHostile takes nothing returns nothing\n    local player p = Player(PLAYER_NEUTRAL_AGGRESSIVE)\n    local unit u\n    local integer unitID\n    local trigger t\n    local real life\n    set u = CreateUnit(p, 'hfoo', 0.0, 0.0, 0.000)\n    set life = GetUnitState(u, UNIT_STATE_LIFE)\n    call SetUnitState(u, UNIT_STATE_LIFE, 0.50 * life)\n    call SetUnitAcquireRange(u, 200.0)\nendfunction\n",
         "function CreateBuildingsForPlayer0 takes nothing returns nothing\n",
-        "function CreateAllUnits takes nothing returns nothing\n    call CreatePlayerBuildings()\n    call CreateNeutralHostile()\n    call CreatePlayerUnits()\nendfunction\n",
+        // Random: their colors red; the creep drops its table's.
+        "    set unitID = gg_rg_000[1]\n    if unitID != -1 then\n        set u = CreateUnit(p, unitID, 1.0, 1.0, 0.000)\n        call SetUnitColor(u, ConvertPlayerColor(0))\n        set t = CreateTrigger()\n        call TriggerRegisterUnitEvent(t, u, EVENT_UNIT_DEATH)\n        call TriggerRegisterUnitEvent(t, u, EVENT_UNIT_CHANGE_OWNER)\n        call TriggerAddAction(t, function ItemTable000002_DropItems)\n    endif\n",
+        "    call RandomDistReset()\n    call RandomDistAddItem('ngol', 50)\n    call RandomDistAddItem('ngme', 50)\n    set unitID = RandomDistChoose()\n    if unitID != -1 then\n        set u = CreateUnit(p, unitID, 2.0, 2.0, 0.000)\n        call SetUnitColor(u, ConvertPlayerColor(0))\n    endif\n",
+        "function ItemTable000002_DropItems takes nothing returns nothing\n",
+        "    call InitRandomGroups()\n    call CreateAllDestructables()\n",
+        "function CreateAllUnits takes nothing returns nothing\n    call CreateNeutralPassiveBuildings()\n    call CreatePlayerBuildings()\n    call CreateNeutralHostile()\n    call CreatePlayerUnits()\nendfunction\n",
         "    call CreateAllDestructables()\n    call CreateAllItems()\n    call CreateAllUnits()\n    call InitBlizzard()\n",
     ] {
         assert!(out.contains(part), "{part}\nnot in:\n{out}");

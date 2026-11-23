@@ -10,7 +10,7 @@
 
 use std::collections::HashSet;
 
-use doo_rs::{Doodad, ItemSet, Unit};
+use doo_rs::{Doodad, ItemSet, Random, Unit};
 use parser_rs::Rawcode;
 
 use crate::ir::*;
@@ -22,11 +22,12 @@ const MADE_BY_GAME: u8 = 0x2;
 /// A destructable's flag: its height is its own, not the ground's.
 const FIXED_Z: u8 = 0x4;
 
-/// What World Editor leaves in a unit's gold that isn't a mine's.
-const DEFAULT_GOLD: u32 = 12500;
-
 /// Start locations: `config`'s, not made.
 const START_LOCATION: Rawcode = Rawcode(*b"sloc");
+/// A random unit, building and item: what they are is in [`Unit::random`].
+const RANDOM_UNIT: Rawcode = Rawcode(*b"uDNR");
+const RANDOM_BUILDING: Rawcode = Rawcode(*b"bDNR");
+const RANDOM_ITEM: Rawcode = Rawcode(*b"iDNR");
 
 /// How many players a map has before its neutral ones: 24 from 1.29.
 pub fn max_players(info: &w3i_rs::Info) -> u32 {
@@ -34,16 +35,28 @@ pub fn max_players(info: &w3i_rs::Info) -> u32 {
     if info.version >= 28 && (major, minor) >= (1, 29) { 24 } else { 12 }
 }
 
-/// What making the placed things needs: the map's files, what the types
-/// are, the names the rest of the code uses, the regions (a waygate's
-/// destination).
+/// What making the placed things needs: the map's files (its info for
+/// its players, item tables and random groups), what the types are, the
+/// names the rest of the code uses, the regions (a waygate's destination).
 pub struct Placing<'a> {
+    pub info: &'a w3i_rs::Info,
     pub doodads: Option<&'a doo_rs::Doodads>,
     pub units: Option<&'a doo_rs::Units>,
     pub objects: &'a Objects,
     pub used: &'a HashSet<String>,
     pub regions: Option<&'a w3r_rs::Regions>,
-    pub max_players: u32,
+}
+
+impl Placing<'_> {
+    /// What a placed type is, a random one's too.
+    fn kind(&self, id: Rawcode) -> Placed {
+        match id {
+            RANDOM_UNIT => Placed::Unit,
+            RANDOM_BUILDING => Placed::Building,
+            RANDOM_ITEM => Placed::Item,
+            _ => self.objects.placed(id),
+        }
+    }
 }
 
 /// What's made: functions, the globals they set, the functions `main`
@@ -71,7 +84,10 @@ fn coord(v: f32) -> Expr {
 }
 
 /// An angle in radians as World Editor writes it: degrees, three
-/// decimals.
+/// decimals. World Editor 6052 and 6059 (The Castle, CruiserCommand) write
+/// every angle so; 6030 and 6031 (Blizzard's maps) one less in the last
+/// digit in about 2% of units, which no way of working it out from the
+/// file's `f32` matches.
 fn degrees(radians: f32) -> Expr {
     Expr::real(radians.to_degrees(), 3)
 }
@@ -148,7 +164,7 @@ fn drop_item(r: Rawcode, objects: &Objects) -> Expr {
 }
 
 /// The sets that drop anything: none when no set has an item.
-fn drop_sets(sets: &[ItemSet]) -> Option<Vec<&ItemSet>> {
+pub(crate) fn drop_sets(sets: &[ItemSet]) -> Option<Vec<&ItemSet>> {
     let sets: Vec<&ItemSet> = sets.iter().filter(|s| !s.is_empty()).collect();
     (!sets.is_empty()).then_some(sets)
 }
@@ -156,7 +172,7 @@ fn drop_sets(sets: &[ItemSet]) -> Option<Vec<&ItemSet>> {
 /// `<Kind><index>_DropItems`: one item of each set dropped where the thing
 /// died, unless it's a hidden unit or one changing owner from any but
 /// Neutral Hostile; a set short of 100 percent may drop none (`-1`).
-fn drop_items(name: String, sets: &[&ItemSet], objects: &Objects) -> Function {
+pub(crate) fn drop_items(name: String, sets: &[&ItemSet], objects: &Objects) -> Function {
     let v = Expr::var;
     let null = || Expr::lit("null");
     let mut drops = Vec::new();
@@ -266,7 +282,10 @@ fn destructables(p: &Placing, doodads: &[Doodad], made: &mut Made) {
             b.push(Stmt::call("SetDestructableLife", vec![me.clone(), Expr::binary(fraction(d.life.into()), BinOp::Mul, Expr::var("life"))]));
         }
         if d.item_table >= 0 {
-            made.errors.push(error(format!("{}: drops from the map's item table {}, which isn't built yet", name("dest", pl.id, d.number), d.item_table)));
+            match item_table(p, d.item_table) {
+                Ok(f) => drop_trigger(&mut b, &me, false, f),
+                Err(e) => made.errors.push(error(format!("{}: {e}", name("dest", pl.id, d.number)))),
+            }
         } else if let Some(sets) = drop_sets(&d.item_sets) {
             let f = format!("Doodad{index:06}_DropItems");
             made.functions.push(drop_items(f.clone(), &sets, p.objects));
@@ -277,9 +296,10 @@ fn destructables(p: &Placing, doodads: &[Doodad], made: &mut Made) {
     made.calls.push("CreateAllDestructables");
 }
 
-/// The items placed: by type, then as placed.
+/// The items placed: by type, then as placed; a random one (`iDNR`) only
+/// when one is chosen.
 fn items(p: &Placing, units: &[Unit], made: &mut Made) {
-    let mut chosen: Vec<&Unit> = units.iter().filter(|u| u.placement.id != START_LOCATION && p.objects.placed(u.placement.id) == Placed::Item).collect();
+    let mut chosen: Vec<&Unit> = units.iter().filter(|u| u.placement.id != START_LOCATION && p.kind(u.placement.id) == Placed::Item).collect();
     if chosen.is_empty() {
         return;
     }
@@ -288,28 +308,107 @@ fn items(p: &Placing, units: &[Unit], made: &mut Made) {
     for u in chosen {
         let pl = &u.placement;
         let gg = name("item", pl.id, u.number);
-        let create = Expr::call("CreateItem", vec![id(pl.id), coord(pl.x), coord(pl.y)]);
-        if p.used.contains(&gg) {
+        let random = match (pl.id == RANDOM_ITEM).then(|| random(p, u, Placed::Item, "itemID")).transpose() {
+            Ok(r) => r,
+            Err(e) => {
+                made.errors.push(error(format!("{gg}: {e}")));
+                continue;
+            }
+        };
+        let ty = if random.is_some() { Expr::var("itemID") } else { id(pl.id) };
+        let create = Expr::call("CreateItem", vec![ty, coord(pl.x), coord(pl.y)]);
+        let made_one = if p.used.contains(&gg) {
             made.globals.push(Global::new(gg.clone(), "item", Some(Expr::lit("null")), Origin::file(ORIGIN)));
-            b.push(Stmt::set(gg, create));
+            Stmt::set(gg, create)
         } else {
             let Expr::Call(call) = create else { unreachable!() };
-            b.push(Stmt::Call { call, line: 0 });
+            Stmt::Call { call, line: 0 }
+        };
+        match random {
+            Some(prelude) => {
+                b.extend(prelude);
+                b.push(chosen_one("itemID", vec![made_one]));
+            }
+            None => b.push(made_one),
         }
     }
     made.functions.push(function("CreateAllItems", b));
     made.calls.push("CreateAllItems");
 }
 
+/// What sets `into` (`unitID`, `itemID`) to a random thing's type: a
+/// column of one of the map's random groups (`gg_rg_003[1]`: see
+/// `tables`), one of its own list by chance, or any of a level (a creep,
+/// `ChooseRandomCreep`; a building, `ChooseRandomNPBuilding`; an item of a
+/// class, `ChooseRandomItemEx`). The last two aren't in Blizzard's maps:
+/// made as their names say.
+fn random(p: &Placing, u: &Unit, kind: Placed, into: &str) -> Result<Vec<Stmt>, String> {
+    Ok(match &u.random {
+        // The group by its number; its global by its place.
+        Random::Group { group, position } => {
+            let Some(index) = p.info.unit_tables.iter().position(|t| t.number == *group as i32) else {
+                return Err(format!("a random unit of group {group}, which the map hasn't"));
+            };
+            vec![Stmt::set(into, Expr::Index(crate::tables::group_name(index), Box::new(Expr::int(*position))))]
+        }
+        Random::Table(list) => {
+            let mut b = vec![Stmt::call("RandomDistReset", Vec::new())];
+            for &(r, chance) in list {
+                b.push(Stmt::call("RandomDistAddItem", vec![id(r), Expr::int(chance)]));
+            }
+            b.push(Stmt::set(into, Expr::call("RandomDistChoose", Vec::new())));
+            b
+        }
+        Random::Any { level, class } => {
+            let any = match kind {
+                Placed::Unit => Expr::call("ChooseRandomCreep", vec![Expr::int(*level)]),
+                Placed::Building => Expr::call("ChooseRandomNPBuilding", Vec::new()),
+                Placed::Item => {
+                    const CLASSES: [&str; 8] = [
+                        "ITEM_TYPE_ANY",
+                        "ITEM_TYPE_PERMANENT",
+                        "ITEM_TYPE_CHARGED",
+                        "ITEM_TYPE_POWERUP",
+                        "ITEM_TYPE_ARTIFACT",
+                        "ITEM_TYPE_PURCHASABLE",
+                        "ITEM_TYPE_CAMPAIGN",
+                        "ITEM_TYPE_MISCELLANEOUS",
+                    ];
+                    let class = CLASSES.get(*class as usize).copied().unwrap_or("ITEM_TYPE_ANY");
+                    Expr::call("ChooseRandomItemEx", vec![Expr::var(class), Expr::int(*level)])
+                }
+            };
+            vec![Stmt::set(into, any)]
+        }
+        // Not random after all: none.
+        Random::None(_) => vec![Stmt::set(into, Expr::int(-1))],
+    })
+}
+
+/// `body` when a random thing was chosen (`into` isn't -1).
+fn chosen_one(into: &str, body: Vec<Stmt>) -> Stmt {
+    Stmt::If { branches: vec![(Expr::binary(Expr::var(into), BinOp::NotEq, Expr::int(-1)), body)], otherwise: None, line: 0 }
+}
+
+/// The function that drops one of the map's item tables' items (see
+/// `tables`), when the map has that table.
+fn item_table(p: &Placing, number: i32) -> Result<String, String> {
+    if p.info.item_tables.iter().any(|t| t.number == number) {
+        Ok(format!("ItemTable{number:06}_DropItems"))
+    } else {
+        Err(format!("drops from item table {number}, which the map hasn't"))
+    }
+}
+
 /// The units and buildings placed, a function for each owner's of each,
 /// the buildings first: by their numbers.
 fn units(p: &Placing, units: &[Unit], made: &mut Made) {
-    let hostile = p.max_players;
-    let passive = p.max_players + 3;
+    let hostile = max_players(p.info);
+    let passive = hostile + 3;
     // (owner, building) → units with their places in the file.
     let mut by: std::collections::BTreeMap<(u32, bool), Vec<(usize, &Unit)>> = Default::default();
     for (i, u) in units.iter().enumerate() {
-        let kind = p.objects.placed(u.placement.id);
+        let kind = p.kind(u.placement.id);
         if u.placement.id == START_LOCATION || kind == Placed::Item {
             continue;
         }
@@ -377,8 +476,9 @@ fn units(p: &Placing, units: &[Unit], made: &mut Made) {
     made.calls.push("CreateAllUnits");
 }
 
-/// One unit and what's set on it.
-fn unit(p: &Placing, index: usize, u: &Unit, b: &mut Vec<Stmt>, made: &mut Made) {
+/// One unit and what's set on it; a random one (`uDNR`, `bDNR`) only when
+/// one is chosen.
+fn unit(p: &Placing, index: usize, u: &Unit, out: &mut Vec<Stmt>, made: &mut Made) {
     let pl = &u.placement;
     let gg = name("unit", pl.id, u.number);
     let target = if p.used.contains(&gg) {
@@ -392,12 +492,15 @@ fn unit(p: &Placing, index: usize, u: &Unit, b: &mut Vec<Stmt>, made: &mut Made)
         args.insert(0, me.clone());
         Stmt::call(name, args)
     };
-    // Random ones are the map's random groups' and tables' (stage 2d).
-    if [b"uDNR", b"bDNR", b"iDNR"].iter().any(|r| pl.id == Rawcode(**r)) {
-        made.errors.push(error(format!("{gg}: a random unit, which isn't built yet")));
-        return;
-    }
-    b.push(Stmt::set(target, Expr::call("CreateUnit", vec![Expr::var("p"), id(pl.id), coord(pl.x), coord(pl.y), degrees(pl.angle)])));
+    let random = match matches!(pl.id, RANDOM_UNIT | RANDOM_BUILDING).then(|| random(p, u, p.kind(pl.id), "unitID")).transpose() {
+        Ok(r) => r,
+        Err(e) => {
+            made.errors.push(error(format!("{gg}: {e}")));
+            return;
+        }
+    };
+    let ty = if random.is_some() { Expr::var("unitID") } else { id(pl.id) };
+    let mut b = vec![Stmt::set(target, Expr::call("CreateUnit", vec![Expr::var("p"), ty, coord(pl.x), coord(pl.y), degrees(pl.angle)]))];
     let hero = pl.id.0[0].is_ascii_uppercase();
     if hero && u.level > 1 {
         b.push(call("SetHeroLevel", vec![Expr::int(u.level), Expr::bool(false)]));
@@ -416,10 +519,30 @@ fn unit(p: &Placing, index: usize, u: &Unit, b: &mut Vec<Stmt>, made: &mut Made)
     if u.mana >= 0 {
         b.push(call("SetUnitState", vec![Expr::var("UNIT_STATE_MANA"), Expr::int(u.mana)]));
     }
-    if u.gold != DEFAULT_GOLD {
+    // A mine's gold, whatever it is (12500 too).
+    if p.objects.is_gold_mine(pl.id) {
         b.push(call("SetResourceAmount", vec![Expr::int(u.gold)]));
     }
-    let color = if u.color >= 0 { Some(u.color) } else { p.objects.team_color(pl.id) };
+    if u.waygate >= 0 {
+        // A region the map hasn't: nothing (Blizzard's BloodvenomFalls, a
+        // mine "to" region 0).
+        if let Some(g) = p.regions.and_then(|r| r.regions.iter().find(|g| g.index == u.waygate)) {
+            let rect = Expr::var(format!("gg_rct_{}", wtg_rs::jass::ident(&g.name)));
+            b.push(call("WaygateSetDestination", vec![Expr::call("GetRectCenterX", vec![rect.clone()]), Expr::call("GetRectCenterY", vec![rect])]));
+            b.push(call("WaygateActivate", vec![Expr::bool(true)]));
+        }
+    }
+    // A mine's color is never set (Blizzard's maps: 7 of 7); a random
+    // unit's is red unless it has one (559 of 559).
+    let color = if p.objects.is_gold_mine(pl.id) {
+        None
+    } else if u.color >= 0 {
+        Some(u.color)
+    } else if random.is_some() {
+        Some(0)
+    } else {
+        p.objects.team_color(pl.id)
+    };
     if let Some(c) = color {
         b.push(call("SetUnitColor", vec![Expr::call("ConvertPlayerColor", vec![Expr::int(c)])]));
     }
@@ -440,25 +563,22 @@ fn unit(p: &Placing, index: usize, u: &Unit, b: &mut Vec<Stmt>, made: &mut Made)
     for &(slot, item) in &u.items {
         b.push(call("UnitAddItemToSlotById", vec![id(item), Expr::int(slot)]));
     }
-    if u.waygate >= 0 {
-        match p.regions.and_then(|r| r.regions.iter().find(|g| g.index == u.waygate)) {
-            Some(g) => {
-                let rect = Expr::var(format!("gg_rct_{}", wtg_rs::jass::ident(&g.name)));
-                b.push(call(
-                    "WaygateSetDestination",
-                    vec![Expr::call("GetRectCenterX", vec![rect.clone()]), Expr::call("GetRectCenterY", vec![rect])],
-                ));
-                b.push(call("WaygateActivate", vec![Expr::bool(true)]));
-            }
-            None => made.errors.push(error(format!("{gg}: a waygate to region {}, which the map hasn't", u.waygate))),
-        }
-    }
     if u.item_table >= 0 {
-        made.errors.push(error(format!("{gg}: drops from the map's item table {}, which isn't built yet", u.item_table)));
+        match item_table(p, u.item_table) {
+            Ok(f) => drop_trigger(&mut b, &me, true, f),
+            Err(e) => made.errors.push(error(format!("{gg}: {e}"))),
+        }
     } else if let Some(sets) = drop_sets(&u.item_sets) {
         let f = format!("Unit{index:06}_DropItems");
         made.functions.push(drop_items(f.clone(), &sets, p.objects));
-        drop_trigger(b, &me, true, f);
+        drop_trigger(&mut b, &me, true, f);
+    }
+    match random {
+        Some(prelude) => {
+            out.extend(prelude);
+            out.push(chosen_one("unitID", b));
+        }
+        None => out.extend(b),
     }
 }
 

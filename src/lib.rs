@@ -8,6 +8,7 @@ pub mod jass;
 pub mod map;
 pub mod objects;
 pub mod placed;
+pub mod tables;
 pub mod uglify;
 
 /// The game's JASS of `files` (this toolchain's JASS, or the game's), in

@@ -9,7 +9,8 @@
 //!   Editor's does (camera bounds, day and night, fog, water, sound,
 //!   music), then what makes the map's things (`InitSounds`,
 //!   `CreateRegions` with their weather and sounds, `CreateCameras`,
-//!   what's placed: [`crate::placed`]), `InitBlizzard` and
+//!   upgrades, tech tree, random groups and item tables:
+//!   [`crate::tables`]; what's placed: [`crate::placed`]), `InitBlizzard` and
 //!   `InitGlobals` (the triggers' variables). The triggers' `main`s come
 //!   after it (World Editor's `InitCustomTriggers`).
 //! - [`end`]: a `main` that runs the triggers of map initialization
@@ -119,7 +120,11 @@ impl GameData {
             if name.is_empty() {
                 continue;
             }
-            let base = table.text(row, dir);
+            // A folder with or without its `\` (both in the game's tables).
+            let mut base = table.text(row, dir);
+            if !base.is_empty() && !base.ends_with('\\') {
+                base.push('\\');
+            }
             for file in table.text(row, files).split(',').map(str::trim).filter(|f| !f.is_empty()) {
                 self.sound_labels.entry(format!("{base}{file}").to_lowercase()).or_insert_with(|| name.clone());
             }
@@ -241,7 +246,9 @@ pub fn start(map: &Map, game: &GameData) -> Result<Module, Vec<Error>> {
     m.functions.push(config(info));
     m.functions.push(player_slots(info));
     m.functions.push(teams(info));
-    m.functions.push(ally_priorities(info));
+    if has_ally_priorities(info) {
+        m.functions.push(ally_priorities(info));
+    }
 
     let mut parts = Vec::new();
     if let Some(s) = map.sounds.filter(|s| !s.sounds.is_empty()) {
@@ -262,13 +269,25 @@ pub fn start(map: &Map, game: &GameData) -> Result<Module, Vec<Error>> {
         m.globals.extend(globals);
         parts.push("CreateCameras");
     }
+    for (name, functions) in [("InitUpgrades", crate::tables::upgrades(info)), ("InitTechTree", crate::tables::tech_tree(info))] {
+        if !functions.is_empty() {
+            m.functions.extend(functions);
+            parts.push(name);
+        }
+    }
+    if let Some((f, globals)) = crate::tables::random_groups(info) {
+        m.functions.push(f);
+        m.globals.extend(globals);
+        parts.push("InitRandomGroups");
+    }
+    m.functions.extend(crate::tables::item_tables(info, map.objects));
     let made = crate::placed::make(&crate::placed::Placing {
+        info,
         doodads: map.doodads,
         units: map.units,
         objects: map.objects,
         used: map.used,
         regions: map.regions,
-        max_players: crate::placed::max_players(info),
     });
     if !made.errors.is_empty() {
         return Err(made.errors);
@@ -300,13 +319,27 @@ fn config(info: &Info) -> Function {
         Stmt::call("SetPlayers", vec![Expr::int(players.len())]),
         Stmt::call("SetTeams", vec![Expr::int(players.len())]),
     ];
-    let placement = if info.flags & CUSTOM_FORCES != 0 { "MAP_PLACEMENT_TEAMS_TOGETHER" } else { "MAP_PLACEMENT_USE_MAP_SETTINGS" };
+    // The map's own placement only when its forces are its own and none is
+    // allied (Blizzard's 108 maps: one is so).
+    let own = info.flags & CUSTOM_FORCES != 0 && info.forces.iter().all(|f| f.flags & ALLIED == 0);
+    let placement = if own { "MAP_PLACEMENT_USE_MAP_SETTINGS" } else { "MAP_PLACEMENT_TEAMS_TOGETHER" };
     b.push(Stmt::call("SetGamePlacement", vec![Expr::var(placement)]));
     for (i, p) in players.iter().enumerate() {
         b.push(Stmt::call("DefineStartLocation", vec![Expr::int(i), coord(p.start_x), coord(p.start_y)]));
     }
-    for f in ["InitCustomPlayerSlots", "InitCustomTeams", "InitAllyPriorities"] {
-        b.push(Stmt::call(f, Vec::new()));
+    b.push(Stmt::call("InitCustomPlayerSlots", Vec::new()));
+    if info.flags & CUSTOM_FORCES != 0 {
+        b.push(Stmt::call("InitCustomTeams", Vec::new()));
+    } else {
+        // The game's teams: every slot a user's (Blizzard's maps without
+        // forces of their own have only users), then the game's setting.
+        for p in players {
+            b.push(Stmt::call("SetPlayerSlotAvailable", vec![player(p), Expr::var("MAP_CONTROL_USER")]));
+        }
+        b.push(Stmt::call("InitGenericPlayerSlots", Vec::new()));
+    }
+    if has_ally_priorities(info) {
+        b.push(Stmt::call("InitAllyPriorities", Vec::new()));
     }
     function("config", b)
 }
@@ -315,13 +348,17 @@ fn player_slots(info: &Info) -> Function {
     let mut b = Vec::new();
     for (i, p) in info.players.iter().enumerate() {
         b.push(Stmt::call("SetPlayerStartLocation", vec![player(p), Expr::int(i)]));
-        if p.fixed_start != 0 || info.flags & FIXED_PLAYER_SETTINGS != 0 {
+        // Fixed (1), not "random but fixed" (2): Blizzard's maps, whatever
+        // the map's flag.
+        if p.fixed_start == 1 {
             b.push(Stmt::call("ForcePlayerStartLocation", vec![player(p), Expr::int(i)]));
         }
         b.push(Stmt::call("SetPlayerColor", vec![player(p), Expr::call("ConvertPlayerColor", vec![Expr::int(p.number)])]));
         let race = RACES.get(p.race as usize).copied().unwrap_or(RACES[0]);
         b.push(Stmt::call("SetPlayerRacePreference", vec![player(p), Expr::var(race)]));
-        let selectable = p.race == 0 || info.flags & FIXED_PLAYER_SETTINGS == 0;
+        // Reign of Chaos's World Editor (`war3map.w3i` 18) lets every race
+        // be chosen.
+        let selectable = info.version < 25 || p.race == 0 || info.flags & FIXED_PLAYER_SETTINGS == 0;
         b.push(Stmt::call("SetPlayerRaceSelectable", vec![player(p), Expr::bool(selectable)]));
         let controller = CONTROLLERS.get(p.kind as usize).copied().unwrap_or(CONTROLLERS[0]);
         b.push(Stmt::call("SetPlayerController", vec![player(p), Expr::var(controller)]));
@@ -360,6 +397,12 @@ fn teams(info: &Info) -> Function {
     function("InitCustomTeams", b)
 }
 
+/// Whether any start location prefers another near it: else World Editor
+/// writes no `InitAllyPriorities`.
+fn has_ally_priorities(info: &Info) -> bool {
+    info.players.iter().any(|p| info.players.iter().any(|q| q.number != p.number && (0..32).contains(&q.number) && (p.ally_high | p.ally_low) & (1 << q.number) != 0))
+}
+
 /// Whom each start location prefers near it (whatever the flag "modify
 /// ally priorities" says: World Editor writes them all the same).
 fn ally_priorities(info: &Info) -> Function {
@@ -372,10 +415,11 @@ fn ally_priorities(info: &Info) -> Function {
             .enumerate()
             .filter(|(j, _)| *j != i)
             .filter_map(|(j, q)| {
-                if bit(p.ally_high, q) {
-                    Some((j, "MAP_LOC_PRIO_HIGH"))
-                } else if bit(p.ally_low, q) {
+                // Both set: low (Blizzard's Monolith).
+                if bit(p.ally_low, q) {
                     Some((j, "MAP_LOC_PRIO_LOW"))
+                } else if bit(p.ally_high, q) {
+                    Some((j, "MAP_LOC_PRIO_HIGH"))
                 } else {
                     None
                 }
@@ -420,11 +464,25 @@ fn setting_up(info: &Info, game: &GameData) -> Vec<Stmt> {
     }
     if info.flags & TERRAIN_FOG != 0 {
         let f = &info.fog;
+        // The file's color is blue, green, red.
         let c = |v: u8| Expr::real(f32::from(v) / 255.0, 3);
         b.push(Stmt::call(
             "SetTerrainFogEx",
-            vec![Expr::int(f.style), coord(f.start_z), coord(f.end_z), Expr::real(f.density, 3), c(f.color[0]), c(f.color[1]), c(f.color[2])],
+            vec![Expr::int(f.style), coord(f.start_z), coord(f.end_z), Expr::real(f.density, 3), c(f.color[2]), c(f.color[1]), c(f.color[0])],
         ));
+    }
+    // The map's weather, over the whole map (the camera's bounds, its
+    // margins and the bounds' complements: left, right, bottom, top).
+    if info.weather != w3i_rs::Rawcode::NONE && info.weather.to_int() != 0 {
+        b.insert(0, Stmt::local("weathereffect", "we", None));
+        let [ml, mr, mt, mb] = [left, right, top, bottom];
+        let c = info.camera_complements.map(|v| v as f32 * CELL);
+        let rect = Expr::call(
+            "Rect",
+            vec![coord(bounds[0] - ml - c[0]), coord(bounds[1] - mb - c[2]), coord(bounds[2] + mr + c[1]), coord(bounds[3] + mt + c[3])],
+        );
+        b.push(Stmt::set("we", Expr::call("AddWeatherEffect", vec![rect, rawcode(info.weather)])));
+        b.push(Stmt::call("EnableWeatherEffect", vec![Expr::var("we"), Expr::bool(true)]));
     }
     if info.flags & WATER_TINT != 0 {
         let w = info.water_color;
@@ -551,19 +609,23 @@ fn sounds(s: &w3s_rs::Sounds, game: &GameData, duration: &dyn Fn(&str) -> Option
                 ],
             ),
         ));
-        if let Some(label) = game.sound_labels.get(&snd.file.to_lowercase()) {
+        let label = game.sound_labels.get(&snd.file.to_lowercase());
+        if let Some(label) = label {
             b.push(Stmt::call("SetSoundParamsFromLabel", vec![me(), Expr::string(label)]));
         }
         if let Some(ms) = duration(&snd.file) {
             b.push(Stmt::call("SetSoundDuration", vec![me(), Expr::int(ms)]));
         }
-        if snd.channel != DEFAULT_INT {
+        // Without a label, channel, volume and pitch are written whatever
+        // they are, "default" too (-1, 4294967296.0).
+        let own = label.is_none();
+        if own || snd.channel != DEFAULT_INT {
             b.push(Stmt::call("SetSoundChannel", vec![me(), Expr::int(snd.channel)]));
         }
-        if snd.volume != DEFAULT_INT {
+        if own || snd.volume != DEFAULT_INT {
             b.push(Stmt::call("SetSoundVolume", vec![me(), Expr::int(snd.volume)]));
         }
-        if real(snd.pitch) {
+        if own || real(snd.pitch) {
             b.push(Stmt::call("SetSoundPitch", vec![me(), coord(snd.pitch)]));
         }
         if snd.flags & SOUND_3D != 0 {

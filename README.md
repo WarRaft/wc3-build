@@ -48,18 +48,28 @@ files or a folder.
   `Stmt::set` ...: every output converts the same tree). Two parts around
   the rest of the code, whose `main`s merge with them in order:
   - `start`: `config` (`SetMapName`, players, teams, placement, start
-    locations; `InitCustomPlayerSlots`, `InitCustomTeams` with what each
-    force's players share and allied victory, `InitAllyPriorities`, which
-    World Editor writes whatever its flag says), and a `main` setting the
-    map up: camera bounds (`war3map.w3i`'s, less the camera's margins),
-    day and night models, terrain fog and water tint (each when its flag
-    is set), sound environment (the tileset's when none), ambient sounds,
-    music, then `InitSounds` (`war3map.w3s`), `CreateRegions`
-    (`war3map.w3r`, each with its weather and its sound), `CreateCameras`
-    (`war3map.w3c`), what's placed (`CreateAllDestructables`,
-    `CreateAllItems`, `CreateAllUnits`: `placed`), `InitBlizzard` and
-    `InitGlobals`. The triggers' `main`s follow (World Editor's
-    `InitCustomTriggers`).
+    locations; `InitCustomPlayerSlots`, then with forces of the map's own
+    `InitCustomTeams` (what each force's players share, allied victory),
+    else each slot a user's and `InitGenericPlayerSlots`;
+    `InitAllyPriorities` when any start location prefers another, whatever
+    the flag says), and a `main` setting the map up: camera bounds
+    (`war3map.w3i`'s, less the camera's margins), day and night models,
+    terrain fog (its color stored blue, green, red), the map's weather
+    over the whole map, water tint, sound environment (the tileset's when
+    none), ambient sounds, music, then `InitSounds` (`war3map.w3s`),
+    `CreateRegions` (`war3map.w3r`, each with its weather and its sound),
+    `CreateCameras` (`war3map.w3c`), `InitUpgrades`, `InitTechTree`,
+    `InitRandomGroups` (`tables`), what's placed
+    (`CreateAllDestructables`, `CreateAllItems`, `CreateAllUnits`:
+    `placed`), `InitBlizzard` and `InitGlobals`. The triggers' `main`s
+    follow (World Editor's `InitCustomTriggers`).
+    - The players: a start location forced when it's fixed (1, not 2,
+      whatever the map's flag); a race chosen when it's random, the
+      players' settings aren't fixed, or the map is Reign of Chaos's
+      (`war3map.w3i` 18); a start location's priority "low" when it's
+      both. The game's placement (`MAP_PLACEMENT_USE_MAP_SETTINGS`) only
+      with forces of the map's own none of which is allied, else teams
+      together.
   - `end`: `RunInitializationTriggers`, the triggers of map
     initialization run once every `main` has.
 
@@ -70,11 +80,13 @@ files or a folder.
   (`UI\SoundInfo\*.slk`, by their files). The triggers' variables and
   which triggers run at initialization are `wtg-rs`'s
   (`jass::map_variable`, `jass::initialization_triggers`). Random groups
-  and item tables, upgrades and the tech tree come next.
+  and item tables, upgrades and the tech tree are `tables`'.
   - Sounds: music is a string, its file; any other is made
     (`CreateSound`), with its label's settings when it's one of the
     game's (`SetSoundParamsFromLabel`), how long it plays, and each
-    setting the file gives rather than World Editor's "default".
+    setting the file gives rather than World Editor's "default"; without
+    a label, its channel, volume and pitch whatever they are (-1,
+    4294967296.0 too).
 - **`placed`**: what `war3map.doo` and `war3mapUnits.doo` place, as
   World Editor's script makes it. A thing is named (`gg_dest_B000_0261`,
   `gg_unit_hfoo_0012`, `gg_item_ratc_0003`: type and number) only when
@@ -86,30 +98,50 @@ files or a folder.
     flag "fixed height" (4), `CreateDeadDestructable` with no life, part
     of its life set (`0.10 * life`).
   - Items: `CreateItem`, by type.
+  - Random ones (`uDNR`, `bDNR`, `iDNR`): the type set first
+    (`unitID`, `itemID`: a column of one of the map's random groups,
+    `gg_rg_000[1]`, the group by its number in the file and its global by
+    its place; one of its own list by chance; any of a level), and the
+    thing made only when one is chosen (not `-1`). A random unit is red
+    unless it has a color.
   - Units: a function each for each owner's buildings and units
     (`CreateBuildingsForPlayer7`, `CreateUnitsForPlayer11`,
     `CreateNeutralHostile(Buildings)`, `CreateNeutralPassive(Buildings)`;
     the neutral owners are 12 and 15, or 24 and 27 from 1.29), by their
     numbers; `CreatePlayerBuildings` and `CreatePlayerUnits` even when
-    empty. On each: a hero's level and attributes, life, mana, gold, its
-    team color (the type's, unless the file gives one), acquisition
-    range (200 for "camp"), each hero ability chosen as many times as its
-    level, the order that turns each ability's autocast on or off,
-    inventory, a waygate's destination.
+    empty. On each: a hero's level and attributes, life, mana, a gold
+    mine's gold (any other's, 0 or 12500, isn't), a waygate's destination
+    (none to a region the map hasn't), its color (the file's, else its
+    type's team color; a mine's never), acquisition range (200 for
+    "camp"), each hero ability chosen as many times as its level, the
+    order that turns each ability's autocast on or off, inventory.
   - What something drops when it dies: a trigger on its death (a unit's
     change of owner too) and `<Doodad|Unit><its place in the file>_DropItems`,
+    or one of the map's item tables' `ItemTable<number>_DropItems`;
     one item of each set that has any (a set short of 100% may drop none,
     `-1`; a random item `YlI1` is `ChooseRandomItemEx(ITEM_TYPE_ARTIFACT, 1)`).
 
   Within a type, World Editor's order of destructables and items is its
   own (neither their numbers nor their places in the file); ours is the
-  file's. What hasn't been seen in a map yet, and is made as World Editor
-  is known to: a hero's attributes, life, gold, a placed color,
-  inventory, waygates. Random units and items, and drops from the map's
-  item tables, are errors until random tables are built.
+  file's. An angle is the file's in degrees: World Editor 6052 and 6059
+  write each so, 6030 and 6031 (Blizzard's maps) one less in the last
+  digit in about 2% of units, which no way of working it out from the
+  file's `f32` matches. What hasn't been seen in a map yet, and is made
+  as World Editor is known to: a hero's attributes, life, inventory,
+  random items placed, random units of any level (`ChooseRandomCreep`,
+  `ChooseRandomNPBuilding`).
+- **`tables`**: what `war3map.w3i` says of the game beyond its players:
+  `InitUpgrades` (each player's: an upgrade researched, its highest level
+  counting from 1, `SetPlayerTechResearched`; unavailable from a level,
+  `SetPlayerTechMaxAllowed`; a function per player that has any),
+  `InitTechTree` (what each can't make, `SetPlayerTechMaxAllowed` 0),
+  `InitRandomGroups` (each group's row chosen by its chances, its ids put
+  in `gg_rg_<its place, 000>`, `-1` for an empty cell or no row) and each
+  item table's `ItemTable<number>_DropItems`, as a thing's own drops.
 - **`objects`**: what `placed` needs of the types, read as World Editor
   reads it: the game's tables (`UnitBalance.slk` `isbldg`, `unitUI.slk`
-  `teamColor`, `ItemData.slk`, `AbilityData.slk` `hero`,
+  `teamColor`, `UnitAbilities.slk` `abilList` (a gold mine has `Agld`),
+  `ItemData.slk`, `AbilityData.slk` `hero`,
   `*AbilityFunc.txt` `Orderon`/`Orderoff`), then the map's object data,
   a custom object taking its standard one's. World Editor's quirks: a
   custom ability's order is always written, `""` when its standard one
@@ -170,7 +202,15 @@ durations), regions (338) and cameras (675), and CruiserCommand's, call
 and set what World Editor's do, none left out; so do the placed things
 of both, every function (The Castle: 108, with 96 that drop items;
 CruiserCommand: 40), the destructables and items as sets, and The
-Castle's whole `main` is 1475 calls. The test takes `MAP` (the map's
+Castle's whole `main` is 1475 calls. `MAPS` (a folder of maps' folders,
+each as `MAP`) does it for many: of Blizzard's 108 melee maps (from `War3.mpq`,
+`War3x.mpq` and `War3Patch.mpq`, which give `GAME_UI` and `GAME_FILES`
+too), 104 make every function alike (of about 16,000 units' angles, 307
+one off in the last digit); the four that don't are World Editor's for what their files
+don't say (an old World Editor's script, a sound's distance taken from
+its label's table, `ChooseRandomItem` where every other map of the same
+World Editor has `ChooseRandomItemEx`, a tileset's missing sound
+environment), listed with why in the test. The test takes `MAP` (the map's
 files, with its object data), `WTG_TEXT`, `MAP_PATCH` (a project's
 `TriggerData.patch.txt`), `GAME_UI` (the layers' `UI` folders, lowest
 first, with `SoundInfo`; the `Units` folder next to each gives the

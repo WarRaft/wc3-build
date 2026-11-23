@@ -63,12 +63,19 @@ fn statements(f: &Function) -> Vec<String> {
 
 /// What World Editor makes of the map's placed things.
 fn made_by_map(name: &str) -> bool {
-    (name.starts_with("Create") && !name.starts_with("Create_")) || name.ends_with("_DropItems")
+    (name.starts_with("Create") && !name.starts_with("Create_"))
+        || name.ends_with("_DropItems")
+        || ["InitUpgrades", "InitTechTree", "InitRandomGroups"].iter().any(|p| name.starts_with(p))
 }
 
 /// The map's part, made of the files at `MAP`, and World Editor's script.
 fn made() -> Option<(Module, Module, Map<'static>, GameData)> {
-    let dir = PathBuf::from(std::env::var_os("MAP")?);
+    Some(made_of(PathBuf::from(std::env::var_os("MAP")?)))
+}
+
+/// The map's part made of the map's files in `dir`, and World Editor's
+/// script.
+fn made_of(dir: PathBuf) -> (Module, Module, Map<'static>, GameData) {
     let ui: Vec<PathBuf> = std::env::split_paths(&std::env::var_os("GAME_UI").expect("GAME_UI")).collect();
     let last = |name: &str| ui.iter().rev().map(|d| d.join(name)).find(|p| p.is_file()).map(|p| read(&p)).unwrap_or_default();
     let mut game = GameData::read(&last("MiscData.txt"), &last("WorldEditData.txt"));
@@ -130,7 +137,7 @@ fn made() -> Option<(Module, Module, Map<'static>, GameData)> {
         let units = d.parent().unwrap().join("Units");
         for e in std::fs::read_dir(&units).into_iter().flatten().flatten() {
             let n = e.file_name().to_string_lossy().to_lowercase();
-            if ["unitbalance.slk", "unitui.slk", "itemdata.slk", "abilitydata.slk"].contains(&n.as_str()) {
+            if ["unitbalance.slk", "unitui.slk", "unitabilities.slk", "itemdata.slk", "abilitydata.slk"].contains(&n.as_str()) {
                 objects.add_table(&read(&e.path()));
             } else if n.ends_with("abilityfunc.txt") {
                 objects.add_ability_func(&read(&e.path()));
@@ -159,7 +166,38 @@ fn made() -> Option<(Module, Module, Map<'static>, GameData)> {
         used,
     };
     let ours = wc3_build::map::start(&map, &game).unwrap_or_else(|e| panic!("{e:?}"));
-    Some((ours, theirs, map, game))
+    (ours, theirs, map, game)
+}
+
+/// Two statements alike but for numbers one apart in their last digit
+/// (World Editor's angles: see `placed`'s `degrees`).
+fn near(x: &str, y: &str) -> bool {
+    if x == y {
+        return true;
+    }
+    // Text and numbers, in turn.
+    fn split(s: &str) -> Vec<(bool, String)> {
+        let mut out: Vec<(bool, String)> = Vec::new();
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            let number = c.is_ascii_digit() || c == '.' || (c == '-' && chars.peek().is_some_and(|d| d.is_ascii_digit()));
+            match out.last_mut() {
+                Some((n, t)) if *n == number && !(number && c == '-') => t.push(c),
+                _ => out.push((number, c.to_string())),
+            }
+        }
+        out
+    }
+    let (a, b) = (split(x), split(y));
+    a.len() == b.len()
+        && a.iter().zip(&b).all(|((n, p), (m, q))| {
+            n == m
+                && (p == q || {
+                    let (Ok(u), Ok(v)) = (p.parse::<f64>(), q.parse::<f64>()) else { return false };
+                    let decimals = p.split_once('.').map_or(0, |(_, f)| f.len()).max(q.split_once('.').map_or(0, |(_, f)| f.len()));
+                    (u - v).abs() <= 10f64.powi(-(decimals as i32)) * 1.0001
+                })
+        })
 }
 
 /// Statements as groups each from a `Create...` on, sorted.
@@ -182,9 +220,63 @@ fn grouped(v: Vec<String>) -> Vec<String> {
 #[ignore]
 fn the_maps_part_as_world_editors() {
     let Some((ours, theirs, map, _)) = made() else { return };
+    let (differ, near_misses) = compare(&ours, &theirs, &map);
+    println!("within the last digit: {near_misses}");
+    assert!(differ.is_empty(), "differ: {differ:?}");
+}
+
+/// Every map in `MAPS` (a folder of maps' folders, as `MAP`; Blizzard's
+/// maps), each as `the_maps_part_as_world_editors`: the maps that differ
+/// must be those World Editor's script is known to make otherwise, for
+/// what their files don't say.
+#[test]
+#[ignore]
+fn many_maps_parts_as_world_editors() {
+    let Some(maps) = std::env::var_os("MAPS") else { return };
+    // Map → why World Editor's differs.
+    let known = [
+        ("(1)TheDeathSheep.w3m", "no sound environment: an old World Editor (4444), its tileset had none"),
+        ("(4)WarChasers.w3m", "an old World Editor (4654): drops made otherwise, ChooseRandomItem"),
+        ("(4)Venetia.w3x", "a sound's distance the file leaves default, taken from its label's table"),
+        ("(6)RiceFields.w3x", "ChooseRandomItem in its item tables, where every other map of World Editor 6030 has ChooseRandomItemEx"),
+    ];
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(maps).unwrap().flatten().map(|e| e.path()).filter(|p| p.join("war3map.j").is_file()).collect();
+    dirs.sort();
+    let (mut alike, mut near, mut failed) = (0, 0, Vec::new());
+    for dir in &dirs {
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        let result = std::panic::catch_unwind(|| {
+            let (ours, theirs, map, _) = made_of(dir.clone());
+            compare(&ours, &theirs, &map)
+        });
+        match result {
+            Ok((differ, n)) if differ.is_empty() => {
+                alike += 1;
+                near += n;
+            }
+            Ok((differ, _)) => failed.push(format!("{name}: {differ:?}")),
+            Err(_) => failed.push(format!("{name}: no map's part")),
+        }
+    }
+    println!("{alike} of {} maps alike ({near} numbers within the last digit)", dirs.len());
+    let unknown: Vec<&String> = failed.iter().filter(|f| !known.iter().any(|(k, _)| f.starts_with(&format!("{k}:")))).collect();
+    for f in &failed {
+        println!("  {f}");
+    }
+    assert!(unknown.is_empty(), "{unknown:#?}");
+}
+
+/// World Editor's functions of the map's part that ours don't make alike
+/// (or ours it hasn't), and how many numbers are one apart in their last
+/// digit.
+fn compare(ours: &Module, theirs: &Module, map: &Map) -> (Vec<String>, usize) {
     let find = |m: &Module, name: &str| m.functions.iter().find(|f| f.sig.name == name).map(statements);
     // main: the map's setting up; what makes things not made yet left out.
-    let later = ["InitCustomTriggers(", "RunInitializationTriggers(", "InitUpgrades(", "InitTechTree(", "InitRandomGroups(", "InitMapItemTables("];
+    let mut later = vec!["InitCustomTriggers(", "RunInitializationTriggers("];
+    // Without the triggers' variables, their setting up.
+    if map.variables.is_empty() {
+        later.push("InitGlobals(");
+    }
     let keep = |c: &String| !later.iter().any(|p| c.starts_with(p));
     let mut names = vec!["config", "InitCustomPlayerSlots", "InitCustomTeams", "InitAllyPriorities", "InitSounds", "CreateRegions", "CreateCameras", "main"];
     if !map.variables.is_empty() {
@@ -199,12 +291,22 @@ fn the_maps_part_as_world_editors() {
     println!("placed: {} functions of World Editor's; only ours: {only_ours:?}", placed.len());
     names.extend(placed);
     let mut differ = Vec::new();
+    let mut near_misses = 0;
     for name in names {
-        let (a, b) = (find(&ours, name).map(|v| v.into_iter().filter(keep).collect::<Vec<_>>()), find(&theirs, name).map(|v| v.into_iter().filter(keep).collect::<Vec<_>>()));
+        let (a, b) = (find(ours, name).map(|v| v.into_iter().filter(keep).collect::<Vec<_>>()), find(theirs, name).map(|v| v.into_iter().filter(keep).collect::<Vec<_>>()));
         println!("{name}: {} of ours, {} of World Editor's", a.as_ref().map_or(0, Vec::len), b.as_ref().map_or(0, Vec::len));
-        let near = |x: &String, y: &String| x == y;
         let (a, b) = if name == "CreateAllDestructables" || name == "CreateAllItems" { (a.map(grouped), b.map(grouped)) } else { (a, b) };
-        let alike = a == b;
+        let same = |x: &Vec<String>, y: &Vec<String>| x.len() == y.len() && x.iter().zip(y).all(|(p, q)| near(p, q));
+        let alike = match (&a, &b) {
+            (Some(x), Some(y)) => same(x, y),
+            (None, None) => true,
+            _ => false,
+        };
+        if alike && a != b {
+            let n = a.as_ref().unwrap().iter().zip(b.as_ref().unwrap()).filter(|(p, q)| p != q).count();
+            println!("  {n} within the last digit");
+            near_misses += n;
+        }
         if !alike {
             let (a, b) = (a.unwrap_or_default(), b.unwrap_or_default());
             let first = a.iter().zip(&b).position(|(x, y)| !near(x, y)).unwrap_or(a.len().min(b.len()));
@@ -212,7 +314,9 @@ fn the_maps_part_as_world_editors() {
             differ.push(name);
         }
     }
-    assert!(differ.is_empty() && only_ours.is_empty(), "differ: {differ:?}");
+    let mut differ: Vec<String> = differ.into_iter().map(String::from).collect();
+    differ.extend(only_ours.iter().map(|n| format!("only ours: {n}")));
+    (differ, near_misses)
 }
 
 /// The whole map built (the map's part, the triggers, the map's end), and
