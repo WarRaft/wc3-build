@@ -32,15 +32,21 @@
 //!   `thistype(x)` are `x`;
 //! - `F.evaluate(...)` and `F.execute(...)` of a function or a method go
 //!   through its trigger, the arguments in globals (`wcb__call_F`,
-//!   `wcb__exec_F`, which the JASS output makes).
+//!   `wcb__exec_F`, which the JASS output makes);
+//! - a function interface `I` is `integer`: `I.f` is `f`'s number among
+//!   the functions taken as `I`'s (from 1), and `x.evaluate(...)` /
+//!   `x.execute(...)` (`wcb__fi_I`, `wcb__fx_I`) put the arguments into
+//!   `I`'s globals and evaluate or execute the trigger of that number
+//!   (`wcb__fit_I[x]`), which calls the function; `f` must take and
+//!   return what `I` does.
 //!
 //! What a name is (`c.value`: which struct's) comes from the types:
 //! parameters, locals, globals, fields, what functions and methods
 //! return. Not lowered yet (an error each): `delegate`, operators,
-//! function interfaces, a struct of more than 8190 instances.
+//! a struct of more than 8190 instances.
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::ir::*;
 
@@ -94,6 +100,8 @@ pub struct Lowered {
 
 struct Types {
     infos: HashMap<String, Info>,
+    /// Function interfaces: their signatures.
+    functions: HashMap<String, Signature>,
     /// Each family of several (its root): its structs, by their types.
     families: HashMap<String, Vec<String>>,
 }
@@ -216,7 +224,8 @@ pub fn lower(m: &mut Module, errors: &mut Vec<Error>) -> Lowered {
             errors.push(Error { origin: s.origin.clone(), message: format!("struct {} extends {p}, which is no struct or interface", s.name) });
         }
     }
-    let mut types = Types { infos, families: HashMap::new() };
+    let functions: HashMap<String, Signature> = std::mem::take(&mut m.function_types).into_iter().map(|t| (t.sig.name.clone(), t.sig)).collect();
+    let mut types = Types { infos, functions, families: HashMap::new() };
     // Families of several: an interface's, a struct's with children.
     let mut members: HashMap<String, Vec<String>> = HashMap::new();
     for s in &structs {
@@ -293,8 +302,10 @@ pub fn lower(m: &mut Module, errors: &mut Vec<Error>) -> Lowered {
 
     // Every function's members written as JASS has them.
     let sigs: HashMap<String, Option<String>> = m.functions.iter().map(|f| (f.sig.name.clone(), f.sig.returns.clone())).chain(m.natives.iter().map(|n| (n.sig.name.clone(), n.sig.returns.clone()))).collect();
+    let params: HashMap<String, Vec<String>> = m.functions.iter().map(|f| (f.sig.name.clone(), f.sig.params.iter().map(|p| p.ty.clone()).collect())).collect();
     let globals: HashMap<String, String> = m.globals.iter().map(|g| (g.name.clone(), g.ty.clone())).collect();
     let dispatched: RefCell<BTreeSet<(String, String)>> = RefCell::new(BTreeSet::new());
+    let pointers = Pointers::default();
     for f in &mut m.functions {
         // In a method `thistype` is its struct.
         let current = f.owner.scope.clone().filter(|s| types.infos.contains_key(s));
@@ -307,7 +318,7 @@ pub fn lower(m: &mut Module, errors: &mut Vec<Error>) -> Lowered {
         }
         let mut locals: HashMap<String, String> = f.sig.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect();
         local_types(&mut f.body, &this_type, &mut locals);
-        let cx = Cx { types: &types, sigs: &sigs, globals: &globals, locals: &locals, current: current.as_deref(), file: &f.origin.file, dispatched: &dispatched };
+        let cx = Cx { types: &types, sigs: &sigs, params: &params, globals: &globals, locals: &locals, current: current.as_deref(), file: &f.origin.file, dispatched: &dispatched, pointers: &pointers };
         let body = std::mem::take(&mut f.body);
         f.body = cx.stmts(body, errors);
         if current.is_some() {
@@ -321,10 +332,11 @@ pub fn lower(m: &mut Module, errors: &mut Vec<Error>) -> Lowered {
     for (root, list) in &types.families {
         destroy_triggers(m, &types, root, list, &mut setup);
     }
+    function_pointers(m, &types, &pointers, &mut setup);
 
-    // Struct and interface types are integers.
+    // Struct, interface and function interface types are integers.
     let integer = |t: &mut String| {
-        if types.infos.contains_key(t.as_str()) {
+        if types.infos.contains_key(t.as_str()) || types.functions.contains_key(t.as_str()) {
             *t = "integer".into();
         }
     };
@@ -336,7 +348,7 @@ pub fn lower(m: &mut Module, errors: &mut Vec<Error>) -> Lowered {
         if let Some(r) = &mut f.sig.returns {
             integer(r);
         }
-        local_types_integer(&mut f.body, &types.infos);
+        local_types_integer(&mut f.body, &|t| types.infos.contains_key(t) || types.functions.contains_key(t));
     }
     Lowered { inits, setup }
 }
@@ -555,6 +567,77 @@ fn dispatcher(m: &mut Module, types: &Types, root: &str, name: &str, setup: &mut
     }
 }
 
+/// Each function interface's runner, `wcb__fi_I` (`.evaluate`) and
+/// `wcb__fx_I` (`.execute`): the arguments into its globals, then the
+/// trigger of the function's number evaluated (its condition calls it and
+/// keeps what it returns) or executed (its action calls it, a thread of
+/// its own); the triggers made before anything runs.
+fn function_pointers(m: &mut Module, types: &Types, pointers: &Pointers, setup: &mut Vec<Stmt>) {
+    let o = Origin::file("the build");
+    let runs = pointers.runs.borrow();
+    for (i, list) in pointers.functions.borrow().iter() {
+        let sig = &types.functions[i];
+        let (evaluate, execute) = runs.get(i).copied().unwrap_or_default();
+        let triggers = format!("wcb__fit_{i}");
+        let arg = |k: usize| format!("wcb__fia_{i}_{k}");
+        let ret = format!("wcb__fir_{i}");
+        let mut t = Global::new(triggers.clone(), "trigger", None, o.clone());
+        t.array = true;
+        m.globals.push(t);
+        for (k, p) in sig.params.iter().enumerate() {
+            m.globals.push(Global::new(arg(k), p.ty.clone(), None, o.clone()));
+        }
+        if let Some(r) = &sig.returns {
+            m.globals.push(Global::new(ret.clone(), r.clone(), None, o.clone()));
+        }
+        let mut params = vec![Param { ty: "integer".into(), name: "wcb__f".into() }];
+        params.extend(sig.params.iter().cloned());
+        let set_args: Vec<Stmt> = sig.params.iter().enumerate().map(|(k, p)| Stmt::set(arg(k), Expr::var(p.name.clone()))).collect();
+        let at = || Expr::Index(triggers.clone(), Box::new(Expr::var("wcb__f")));
+        if evaluate {
+            let mut body = set_args.clone();
+            body.push(Stmt::call("TriggerEvaluate", vec![at()]));
+            if sig.returns.is_some() {
+                body.push(Stmt::Return { value: Some(Expr::var(ret.clone())), line: 0 });
+            }
+            let mut f = Function::new(format!("wcb__fi_{i}"), body, o.clone());
+            f.sig.params = params.clone();
+            f.sig.returns = sig.returns.clone();
+            m.functions.push(f);
+        }
+        if execute {
+            let mut body = set_args.clone();
+            body.push(Stmt::call("TriggerExecute", vec![at()]));
+            let mut f = Function::new(format!("wcb__fx_{i}"), body, o.clone());
+            f.sig.params = params.clone();
+            m.functions.push(f);
+        }
+        for (k, name) in list.iter().enumerate() {
+            let number = k + 1;
+            let call = Call { name: name.clone(), args: (0..sig.params.len()).map(|j| Expr::var(arg(j))).collect() };
+            let at = || Expr::Index(triggers.clone(), Box::new(Expr::int(number)));
+            setup.push(Stmt::set_at(triggers.clone(), Expr::int(number), Expr::call("CreateTrigger", vec![])));
+            if evaluate || !execute {
+                let thunk = format!("wcb__fithunk_{i}_{number}");
+                let mut body = vec![match sig.returns {
+                    Some(_) => Stmt::set(ret.clone(), Expr::Call(call.clone())),
+                    None => Stmt::Call { call: call.clone(), line: 0 },
+                }];
+                body.push(Stmt::Return { value: Some(Expr::lit("true")), line: 0 });
+                let mut f = Function::new(thunk.clone(), body, o.clone());
+                f.sig.returns = Some("boolean".into());
+                m.functions.push(f);
+                setup.push(Stmt::call("TriggerAddCondition", vec![at(), Expr::call("Condition", vec![Expr::code(thunk)])]));
+            }
+            if execute {
+                let action = format!("wcb__fiaction_{i}_{number}");
+                m.functions.push(Function::new(action.clone(), vec![Stmt::Call { call, line: 0 }], o.clone()));
+                setup.push(Stmt::call("TriggerAddAction", vec![at(), Expr::code(action)]));
+            }
+        }
+    }
+}
+
 /// Locals' types (`thistype` made its struct), into `types`.
 fn local_types(body: &mut [Stmt], this_type: &dyn Fn(&str) -> String, types: &mut HashMap<String, String>) {
     for s in body {
@@ -575,17 +658,17 @@ fn local_types(body: &mut [Stmt], this_type: &dyn Fn(&str) -> String, types: &mu
     }
 }
 
-fn local_types_integer(body: &mut [Stmt], infos: &HashMap<String, Info>) {
+fn local_types_integer(body: &mut [Stmt], integer: &dyn Fn(&str) -> bool) {
     for s in body {
         match s {
-            Stmt::Local { ty, .. } if infos.contains_key(ty.as_str()) => *ty = "integer".into(),
+            Stmt::Local { ty, .. } if integer(ty) => *ty = "integer".into(),
             Stmt::If { branches, otherwise, .. } => {
-                branches.iter_mut().for_each(|(_, b)| local_types_integer(b, infos));
+                branches.iter_mut().for_each(|(_, b)| local_types_integer(b, integer));
                 if let Some(b) = otherwise {
-                    local_types_integer(b, infos);
+                    local_types_integer(b, integer);
                 }
             }
-            Stmt::Loop { body, .. } => local_types_integer(body, infos),
+            Stmt::Loop { body, .. } => local_types_integer(body, integer),
             _ => {}
         }
     }
@@ -596,6 +679,8 @@ struct Cx<'a> {
     types: &'a Types,
     /// Functions: what each returns.
     sigs: &'a HashMap<String, Option<String>>,
+    /// Functions' parameters' types.
+    params: &'a HashMap<String, Vec<String>>,
     globals: &'a HashMap<String, String>,
     locals: &'a HashMap<String, String>,
     /// The struct of the method.
@@ -603,6 +688,31 @@ struct Cx<'a> {
     file: &'a str,
     /// The calls by type made: family root, method.
     dispatched: &'a RefCell<BTreeSet<(String, String)>>,
+    pointers: &'a Pointers,
+}
+
+/// Function interfaces' functions taken (`I.f`), and how they're run.
+#[derive(Default)]
+struct Pointers {
+    /// Each interface's functions, by their numbers (from 1).
+    functions: RefCell<BTreeMap<String, Vec<String>>>,
+    /// Each interface's runs: `.evaluate`, `.execute`.
+    runs: RefCell<BTreeMap<String, (bool, bool)>>,
+}
+
+impl Pointers {
+    /// `f`'s number in `i`.
+    fn number(&self, i: &str, f: &str) -> usize {
+        let mut all = self.functions.borrow_mut();
+        let list = all.entry(i.to_string()).or_default();
+        match list.iter().position(|g| g == f) {
+            Some(k) => k + 1,
+            None => {
+                list.push(f.to_string());
+                list.len()
+            }
+        }
+    }
 }
 
 impl Cx<'_> {
@@ -733,6 +843,19 @@ impl Cx<'_> {
                 }
                 None => (Expr::Code(n), Some("code".into())),
             },
+            // `I.f`: the number of `f` among `I`'s functions.
+            Expr::Member(object, name) if matches!(&*object, Expr::Var(i) if self.types.functions.contains_key(i) && self.type_of_var(i).is_none()) => {
+                let Expr::Var(i) = *object else { unreachable!() };
+                let Some(params) = self.params.get(&name) else {
+                    self.error(errors, line, format!("{i}.{name}: no function {name}"));
+                    return (Expr::lit("0"), None);
+                };
+                let sig = &self.types.functions[&i];
+                if params.len() != sig.params.len() || params.iter().zip(&sig.params).any(|(a, b)| *a != b.ty) || self.sigs[&name] != sig.returns {
+                    self.error(errors, line, format!("{i}.{name}: {name} doesn't take and return what {i} does"));
+                }
+                (Expr::int(self.pointers.number(&i, &name)), Some(i))
+            }
             Expr::Member(object, name) => {
                 // `S.typeid`: the struct's type.
                 if name == "typeid"
@@ -846,6 +969,29 @@ impl Cx<'_> {
             return (call(f, args), t);
         }
         let (o, t) = self.expr(object, line, errors);
+        // A function interface's: run by its number, the arguments in
+        // globals (`wcb__fi_I`, `wcb__fx_I`).
+        if let Some(i) = t.as_ref().filter(|t| self.types.functions.contains_key(*t)) {
+            let returns = self.types.functions[i].returns.clone();
+            args.insert(0, o);
+            let mut runs = self.pointers.runs.borrow_mut();
+            let r = runs.entry(i.clone()).or_default();
+            return match name.as_str() {
+                "evaluate" => {
+                    r.0 = true;
+                    (call(format!("wcb__fi_{i}"), args), returns)
+                }
+                "execute" => {
+                    r.1 = true;
+                    (call(format!("wcb__fx_{i}"), args), None)
+                }
+                _ => {
+                    drop(runs);
+                    self.error(errors, line, format!(".{name}() of a function interface: only evaluate and execute"));
+                    (Expr::lit("0"), None)
+                }
+            };
+        }
         let Some(t) = t.filter(|t| self.types.infos.contains_key(t)) else {
             self.error(errors, line, format!(".{name}() of what isn't a struct (or whose type can't be told)"));
             return (Expr::lit("0"), None);

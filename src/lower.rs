@@ -116,10 +116,12 @@ pub fn lower(m: &Module) -> Result<Module, Vec<Error>> {
         }
     }
 
+    // Function interfaces' names, as written: `I.f`'s `f` is a function.
+    let ftypes: HashSet<String> = m.function_types.iter().map(|t| t.sig.name.clone()).collect();
     for g in &mut m.globals {
         let scope = g.owner.scope.clone();
         if let Some(e) = &mut g.init {
-            names_in_expr(e, &|n| resolve(scope.as_deref(), n), &HashSet::new());
+            names_in_expr(e, &|n| resolve(scope.as_deref(), n), &HashSet::new(), &ftypes);
             modulo(e);
         }
         g.ty = resolve(scope.as_deref(), &g.ty);
@@ -145,7 +147,7 @@ pub fn lower(m: &Module) -> Result<Module, Vec<Error>> {
         let library = |n: &str| present.contains(n);
         let constant = |n: &str| constants.get(&r(n)).copied();
         f.body = static_ifs(std::mem::take(&mut f.body), &f.origin.file, &library, &constant, &mut errors);
-        names(&mut f.body, &r, &own);
+        names(&mut f.body, &r, &own, &ftypes);
         f.body.iter_mut().for_each(modulo_stmt);
         f.sig.name = r(&f.sig.name);
         f.owner = Owner::default();
@@ -160,7 +162,7 @@ pub fn lower(m: &Module) -> Result<Module, Vec<Error>> {
         for f in &mut st.fields {
             f.ty = r(&f.ty);
             if let Some(e) = &mut f.init {
-                names_in_expr(e, &r, &HashSet::new());
+                names_in_expr(e, &r, &HashSet::new(), &ftypes);
                 modulo(e);
             }
         }
@@ -178,7 +180,7 @@ pub fn lower(m: &Module) -> Result<Module, Vec<Error>> {
             let library = |n: &str| present.contains(n);
             let constant = |n: &str| constants.get(&r(n)).copied();
             f.body = static_ifs(std::mem::take(&mut f.body), &f.origin.file, &library, &constant, &mut errors);
-            names(&mut f.body, &r, &own);
+            names(&mut f.body, &r, &own, &ftypes);
             f.body.iter_mut().for_each(modulo_stmt);
         }
         st.owner = Owner { scope, access: Access::Everyone };
@@ -195,10 +197,22 @@ pub fn lower(m: &Module) -> Result<Module, Vec<Error>> {
                 *t = r(t);
             }
             if let Some(d) = &mut me.defaults {
-                names_in_expr(d, &r, &HashSet::new());
+                names_in_expr(d, &r, &HashSet::new(), &ftypes);
             }
         }
         i.owner = Owner { scope, access: Access::Everyone };
+    }
+    for t in &mut m.function_types {
+        let scope = t.owner.scope.clone();
+        let r = |n: &str| resolve(scope.as_deref(), n);
+        t.sig.name = r(&t.sig.name);
+        for p in &mut t.sig.params {
+            p.ty = r(&p.ty);
+        }
+        if let Some(x) = &mut t.sig.returns {
+            *x = r(x);
+        }
+        t.owner = Owner::default();
     }
     let lowered = crate::structs::lower(&mut m, &mut errors);
     let struct_inits = lowered.inits;
@@ -389,7 +403,7 @@ fn locals(body: &[Stmt], out: &mut HashSet<String>) {
 
 /// Every name `body` uses that isn't `own` (its parameters and locals) as
 /// `to` says; types of locals too.
-fn names(body: &mut [Stmt], to: &dyn Fn(&str) -> String, own: &HashSet<String>) {
+fn names(body: &mut [Stmt], to: &dyn Fn(&str) -> String, own: &HashSet<String>, ftypes: &HashSet<String>) {
     let name = |n: &mut String| {
         if !own.contains(n.as_str()) {
             *n = to(n);
@@ -400,50 +414,52 @@ fn names(body: &mut [Stmt], to: &dyn Fn(&str) -> String, own: &HashSet<String>) 
             Stmt::Local { ty, init, .. } => {
                 *ty = to(ty);
                 if let Some(e) = init {
-                    names_in_expr(e, to, own);
+                    names_in_expr(e, to, own, ftypes);
                 }
             }
             Stmt::Set { name: n, index, value, .. } => {
                 name(n);
                 if let Some(i) = index {
-                    names_in_expr(i, to, own);
+                    names_in_expr(i, to, own, ftypes);
                 }
-                names_in_expr(value, to, own);
+                names_in_expr(value, to, own, ftypes);
             }
             Stmt::Call { call, .. } => {
                 call.name = to(&call.name);
-                call.args.iter_mut().for_each(|a| names_in_expr(a, to, own));
+                call.args.iter_mut().for_each(|a| names_in_expr(a, to, own, ftypes));
             }
             Stmt::If { branches, otherwise, .. } => {
                 for (c, b) in branches {
-                    names_in_expr(c, to, own);
-                    names(b, to, own);
+                    names_in_expr(c, to, own, ftypes);
+                    names(b, to, own, ftypes);
                 }
                 if let Some(b) = otherwise {
-                    names(b, to, own);
+                    names(b, to, own, ftypes);
                 }
             }
-            Stmt::Loop { body, .. } => names(body, to, own),
-            Stmt::ExitWhen { cond, .. } => names_in_expr(cond, to, own),
+            Stmt::Loop { body, .. } => names(body, to, own, ftypes),
+            Stmt::ExitWhen { cond, .. } => names_in_expr(cond, to, own, ftypes),
             Stmt::Return { value, .. } => {
                 if let Some(e) = value {
-                    names_in_expr(e, to, own);
+                    names_in_expr(e, to, own, ftypes);
                 }
             }
-            Stmt::Debug { stmt, .. } => names(std::slice::from_mut(stmt), to, own),
+            Stmt::Debug { stmt, .. } => names(std::slice::from_mut(stmt), to, own, ftypes),
             other => {
                 let (es, bs) = other.oop_parts_mut();
-                es.into_iter().for_each(|e| names_in_expr(e, to, own));
-                bs.into_iter().for_each(|b| names(b, to, own));
+                es.into_iter().for_each(|e| names_in_expr(e, to, own, ftypes));
+                bs.into_iter().for_each(|b| names(b, to, own, ftypes));
             }
         }
     }
 }
 
-fn names_in_expr(e: &mut Expr, to: &dyn Fn(&str) -> String, own: &HashSet<String>) {
+fn names_in_expr(e: &mut Expr, to: &dyn Fn(&str) -> String, own: &HashSet<String>, ftypes: &HashSet<String>) {
     match e {
         Expr::Var(n) | Expr::Index(n, _) if !own.contains(n.as_str()) => *n = to(n),
         Expr::Call(c) => c.name = to(&c.name),
+        // `I.f` of a function interface `I`: the function, by its name there.
+        Expr::Member(o, f) if matches!(&**o, Expr::Var(i) if ftypes.contains(i) && !own.contains(i)) => *f = to(f),
         // `function Data.onTimer`: the struct's name.
         Expr::Code(n) => {
             *n = match n.split_once('.') {
@@ -454,7 +470,7 @@ fn names_in_expr(e: &mut Expr, to: &dyn Fn(&str) -> String, own: &HashSet<String
         _ => {}
     }
     for c in e.children_mut() {
-        names_in_expr(c, to, own);
+        names_in_expr(c, to, own, ftypes);
     }
 }
 

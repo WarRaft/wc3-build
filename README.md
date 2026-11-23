@@ -124,8 +124,13 @@ Shape isn't built into JASS yet").
   must have every method of its interface that has no `defaults`. What
   `a` in `a.b` is comes from the types: parameters, locals, globals,
   fields, what functions and methods return, casts. A struct's type is
-  `integer`. Not lowered yet (errors): `delegate`, operators, function
-  interfaces, more than 8190 instances.
+  `integer`. A function interface `I` is `integer` too: `I.f` is `f`'s
+  number among the functions taken as `I`'s, and `x.evaluate(...)` /
+  `x.execute(...)` (`wcb__fi_I`, `wcb__fx_I`) put the arguments into
+  `I`'s globals and evaluate or execute the trigger of that number
+  (`wcb__fit_I[x]`), which calls the function; a function that doesn't
+  take and return what `I` does is an error. Not lowered yet (errors):
+  `delegate`, operators, more than 8190 instances.
 
 - **`map`**: the map's own part of its script, out of its files, as World
   Editor makes it, made as the IR's nodes (`ir`'s `Expr::call`,

@@ -286,3 +286,65 @@ endlibrary
         assert!(out.contains(part), "{part}\nnot in:\n{out}");
     }
 }
+
+#[test]
+fn function_interfaces_by_number() {
+    let src = r#"// @dialect vjass
+library F
+    function interface Op takes integer x, S s returns integer
+    struct S
+        integer v
+    endstruct
+    function Twice takes integer x, S s returns integer
+        return x * 2 + s.v
+    endfunction
+    function Thrice takes integer x, S s returns integer
+        return x * 3
+    endfunction
+    function Go takes nothing returns nothing
+        local Op o = Op.Twice
+        local S s = S.create()
+        local integer n = o.evaluate(1, s)
+        set o = Op.Thrice
+        call o.execute(n, s)
+        set o = Op.Twice
+    endfunction
+endlibrary
+"#;
+    let out = build(&[("f.j", src)]).unwrap_or_else(|e| panic!("{e:?}"));
+    for part in [
+        "trigger array wcb__fit_Op",
+        "integer wcb__fia_Op_1",
+        "function wcb__fi_Op takes integer wcb__f, integer x, integer s returns integer\nset wcb__fia_Op_0 = x\nset wcb__fia_Op_1 = s\ncall TriggerEvaluate(wcb__fit_Op[wcb__f])\nreturn wcb__fir_Op\nendfunction",
+        "function wcb__fx_Op takes integer wcb__f, integer x, integer s returns nothing",
+        "function wcb__fithunk_Op_1 takes nothing returns boolean\nset wcb__fir_Op = Twice(wcb__fia_Op_0, wcb__fia_Op_1)\nreturn true",
+        "function wcb__fiaction_Op_2 takes nothing returns nothing\ncall Thrice(wcb__fia_Op_0, wcb__fia_Op_1)",
+        "local integer o = 1",
+        "local integer n = wcb__fi_Op(o, 1, s)",
+        "set o = 2",
+        "call wcb__fx_Op(o, n, s)",
+        "set wcb__fit_Op[2] = CreateTrigger()",
+    ] {
+        assert!(out.contains(part), "{part}\nnot in:\n{out}");
+    }
+    assert!(!out.contains("wcb__fit_Op[3]"), "{out}");
+}
+
+#[test]
+fn a_function_interface_takes_only_its_like() {
+    let src = r#"// @dialect vjass
+library F
+    function interface Op takes integer x returns integer
+    function Real takes real x returns integer
+        return 0
+    endfunction
+    function Go takes nothing returns nothing
+        local Op o = Op.Real
+        set o = Op.Nothing
+    endfunction
+endlibrary
+"#;
+    let e = build(&[("f.j", src)]).unwrap_err();
+    assert!(e.iter().any(|m| m.contains("Op.Real: Real doesn't take and return what Op does")), "{e:?}");
+    assert!(e.iter().any(|m| m.contains("Op.Nothing: no function Nothing")), "{e:?}");
+}
