@@ -129,8 +129,17 @@ Shape isn't built into JASS yet").
   `x.execute(...)` (`wcb__fi_I`, `wcb__fx_I`) put the arguments into
   `I`'s globals and evaluate or execute the trigger of that number
   (`wcb__fit_I[x]`), which calls the function; a function that doesn't
-  take and return what `I` does is an error. Not lowered yet (errors):
-  `delegate`, operators, more than 8190 instances.
+  take and return what `I` does is an error. Operators are methods
+  named as JassHelper's: `a.x` and `set a.x = v` of a struct without a
+  field `x` call `s__S__get_x` and `s__S__set_x`, `a[i]` and `set a[i] =
+  v` of a struct (that isn't an array; `S[i]` a static one)
+  `s__S__getindex` and `s__S__setindex`, `a < b` `s__S__lt(a, b)` (`a >
+  b` is `b < a`, `<=` and `>=` the other's `not`). A `delegate` field
+  gives its struct what its type has: `a.x` and `a.m()` of a struct
+  without them are `a.d.x` and `a.d.m()`, through a delegate's own
+  delegates too. Not lowered yet (errors): an operator of an interface
+  or a `stub` one, a static `delegate` or an array of them, more than
+  8190 instances.
 
 - **`map`**: the map's own part of its script, out of its files, as World
   Editor makes it, made as the IR's nodes (`ir`'s `Expr::call`,

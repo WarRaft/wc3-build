@@ -38,23 +38,33 @@
 //!   `x.execute(...)` (`wcb__fi_I`, `wcb__fx_I`) put the arguments into
 //!   `I`'s globals and evaluate or execute the trigger of that number
 //!   (`wcb__fit_I[x]`), which calls the function; `f` must take and
-//!   return what `I` does.
+//!   return what `I` does;
+//! - operators are methods named as JassHelper's: `a.x` and `set a.x =`
+//!   of a struct without a field `x` call `s__S__get_x` / `s__S__set_x`,
+//!   `a[i]` and `set a[i] =` of a struct (not an array; `S[i]` static)
+//!   `s__S__getindex` / `s__S__setindex`, `a < b` `s__S__lt(a, b)` (`>`
+//!   turned round, `<=` and `>=` the other's `not`);
+//! - a `delegate` field gives its struct what its type has: `a.x`,
+//!   `a.m()` of a struct without them are `a.d.x`, `a.d.m()` (through a
+//!   delegate's delegates too).
 //!
 //! What a name is (`c.value`: which struct's) comes from the types:
 //! parameters, locals, globals, fields, what functions and methods
-//! return. Not lowered yet (an error each): `delegate`, operators,
-//! a struct of more than 8190 instances.
+//! return. Not lowered yet (an error each): an operator of an interface
+//! or a `stub` one, a `delegate` static or an array, a struct of more
+//! than 8190 instances.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::ir::*;
 
 /// Instances a struct has without a size.
 const DEFAULT_SIZE: i64 = 8191;
 
-/// A field: its type, whether static, an instance's array's size.
-type FieldInfo = (String, bool, Option<i64>);
+/// A field: its type, whether static, an instance's array's size,
+/// whether an array.
+type FieldInfo = (String, bool, Option<i64>, bool);
 
 #[derive(Clone)]
 struct MethodInfo {
@@ -77,6 +87,8 @@ struct Info {
     /// Field: its type, static, array size (instances' fields).
     fields: HashMap<String, FieldInfo>,
     methods: HashMap<String, MethodInfo>,
+    /// Its `delegate` fields: name, type.
+    delegates: Vec<(String, String)>,
     /// Its type in its family (from 1), 0 for an interface.
     typeid: usize,
 }
@@ -85,8 +97,19 @@ impl Info {
     fn field(&self, f: &str) -> String {
         format!("s__{}_{f}", self.name)
     }
+    /// A method's function; an operator's as JassHelper names it.
     fn method(&self, m: &str) -> String {
-        format!("s__{}_{m}", self.name)
+        let n = &self.name;
+        match m.strip_prefix("operator ") {
+            Some("[]") => format!("s__{n}__getindex"),
+            Some("[]=") => format!("s__{n}__setindex"),
+            Some("<") => format!("s__{n}__lt"),
+            Some(x) => match x.strip_suffix('=') {
+                Some(x) => format!("s__{n}__set_{x}"),
+                None => format!("s__{n}__get_{x}"),
+            },
+            None => format!("s__{n}_{m}"),
+        }
     }
 }
 
@@ -145,10 +168,7 @@ impl Types {
     /// the nearest that declares it.
     fn method(&self, t: &str, m: &str) -> Option<(&Info, &MethodInfo)> {
         let chain = self.chain(t);
-        chain
-            .iter()
-            .find_map(|i| i.methods.get(m).filter(|x| !x.abstract_).map(|x| (*i, x)))
-            .or_else(|| chain.iter().find_map(|i| i.methods.get(m).map(|x| (*i, x))))
+        chain.iter().find_map(|i| i.methods.get(m).filter(|x| !x.abstract_).map(|x| (*i, x))).or_else(|| chain.iter().find_map(|i| i.methods.get(m).map(|x| (*i, x))))
     }
 
     /// Does a call of `m` on a `t` go by the instance's type?
@@ -157,6 +177,15 @@ impl Types {
             return false;
         }
         self.chain(t).iter().any(|i| i.methods.get(m).is_some_and(|x| x.stub || x.abstract_))
+    }
+
+    /// The `delegate` field of `t` (or a parent) whose type (or its
+    /// delegates') has what `has` looks for: its name and type.
+    fn delegate(&self, t: &str, has: &dyn Fn(&str) -> bool) -> Option<(String, String)> {
+        fn reaches(types: &Types, t: &str, has: &dyn Fn(&str) -> bool, depth: usize) -> bool {
+            has(t) || (depth < 8 && types.chain(t).iter().any(|i| i.delegates.iter().any(|(_, d)| reaches(types, d, has, depth + 1))))
+        }
+        self.chain(t).iter().find_map(|i| i.delegates.iter().find(|(_, d)| reaches(self, d, has, 0)).cloned())
     }
 
     fn type_global(&self, t: &str) -> String {
@@ -181,7 +210,7 @@ pub fn lower(m: &mut Module, errors: &mut Vec<Error>) -> Lowered {
     };
     for i in &interfaces {
         let methods = i.methods.iter().map(|me| (me.function.sig.name.clone(), method_info(me, &i.name))).collect();
-        infos.insert(i.name.clone(), Info { name: i.name.clone(), interface: true, array: false, parent: None, fields: HashMap::new(), methods, typeid: 0 });
+        infos.insert(i.name.clone(), Info { name: i.name.clone(), interface: true, array: false, parent: None, fields: HashMap::new(), methods, delegates: Vec::new(), typeid: 0 });
     }
     for s in &structs {
         let err = |errors: &mut Vec<Error>, what: &str| errors.push(Error { origin: s.origin.clone(), message: format!("struct {}: {what} isn't built into JASS yet", s.name) });
@@ -191,10 +220,15 @@ pub fn lower(m: &mut Module, errors: &mut Vec<Error>) -> Lowered {
             _ => {}
         }
         let parent = s.extends.clone().filter(|e| e != "array");
-        let mut info = Info { name: s.name.clone(), interface: false, array: s.extends.as_deref() == Some("array"), parent, fields: HashMap::new(), methods: HashMap::new(), typeid: 0 };
+        let mut info =
+            Info { name: s.name.clone(), interface: false, array: s.extends.as_deref() == Some("array"), parent, fields: HashMap::new(), methods: HashMap::new(), delegates: Vec::new(), typeid: 0 };
         for f in &s.fields {
             if f.delegate {
-                err(errors, "`delegate`");
+                if f.is_static || f.array.is_some() {
+                    err(errors, &format!("`delegate` {}, static or an array", f.name));
+                } else {
+                    info.delegates.push((f.name.clone(), f.ty.clone()));
+                }
             }
             let k = match &f.array {
                 Some(Some(e)) if !f.is_static => literal_int(e).or_else(|| {
@@ -207,11 +241,11 @@ pub fn lower(m: &mut Module, errors: &mut Vec<Error>) -> Lowered {
                 }
                 _ => None,
             };
-            info.fields.insert(f.name.clone(), (f.ty.clone(), f.is_static, k));
+            info.fields.insert(f.name.clone(), (f.ty.clone(), f.is_static, k, f.array.is_some()));
         }
         for me in &s.methods {
-            if me.function.sig.name.starts_with("operator") {
-                err(errors, &format!("`method {}`", me.function.sig.name));
+            if me.function.sig.name.starts_with("operator") && me.stub {
+                err(errors, &format!("`stub method {}`", me.function.sig.name));
             }
             info.methods.insert(me.function.sig.name.clone(), method_info(me, &s.name));
         }
@@ -301,15 +335,19 @@ pub fn lower(m: &mut Module, errors: &mut Vec<Error>) -> Lowered {
     }
 
     // Every function's members written as JASS has them.
-    let sigs: HashMap<String, Option<String>> = m.functions.iter().map(|f| (f.sig.name.clone(), f.sig.returns.clone())).chain(m.natives.iter().map(|n| (n.sig.name.clone(), n.sig.returns.clone()))).collect();
+    let sigs: HashMap<String, Option<String>> =
+        m.functions.iter().map(|f| (f.sig.name.clone(), f.sig.returns.clone())).chain(m.natives.iter().map(|n| (n.sig.name.clone(), n.sig.returns.clone()))).collect();
     let params: HashMap<String, Vec<String>> = m.functions.iter().map(|f| (f.sig.name.clone(), f.sig.params.iter().map(|p| p.ty.clone()).collect())).collect();
     let globals: HashMap<String, String> = m.globals.iter().map(|g| (g.name.clone(), g.ty.clone())).collect();
+    let global_arrays: HashSet<String> = m.globals.iter().filter(|g| g.array).map(|g| g.name.clone()).collect();
     let dispatched: RefCell<BTreeSet<(String, String)>> = RefCell::new(BTreeSet::new());
     let pointers = Pointers::default();
     for f in &mut m.functions {
         // In a method `thistype` is its struct.
         let current = f.owner.scope.clone().filter(|s| types.infos.contains_key(s));
-        let this_type = |t: &str| if t == "thistype" { current.clone().unwrap_or_default() } else { t.to_string() };
+        let this_type = |t: &str| {
+            if t == "thistype" { current.clone().unwrap_or_default() } else { t.to_string() }
+        };
         for p in &mut f.sig.params {
             p.ty = this_type(&p.ty);
         }
@@ -317,8 +355,21 @@ pub fn lower(m: &mut Module, errors: &mut Vec<Error>) -> Lowered {
             *r = this_type(r);
         }
         let mut locals: HashMap<String, String> = f.sig.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect();
-        local_types(&mut f.body, &this_type, &mut locals);
-        let cx = Cx { types: &types, sigs: &sigs, params: &params, globals: &globals, locals: &locals, current: current.as_deref(), file: &f.origin.file, dispatched: &dispatched, pointers: &pointers };
+        let mut arrays = HashSet::new();
+        local_types(&mut f.body, &this_type, &mut locals, &mut arrays);
+        let cx = Cx {
+            types: &types,
+            sigs: &sigs,
+            params: &params,
+            globals: &globals,
+            locals: &locals,
+            arrays: &arrays,
+            global_arrays: &global_arrays,
+            current: current.as_deref(),
+            file: &f.origin.file,
+            dispatched: &dispatched,
+            pointers: &pointers,
+        };
         let body = std::mem::take(&mut f.body);
         f.body = cx.stmts(body, errors);
         if current.is_some() {
@@ -416,7 +467,9 @@ fn allocator(m: &mut Module, types: &Types, structs: &[Struct], s: &Struct) {
     }
     // The fields with a value, its parents' first.
     for i in types.chain(&s.name).into_iter().rev() {
-        let Some(x) = structs.iter().find(|x| x.name == i.name) else { continue };
+        let Some(x) = structs.iter().find(|x| x.name == i.name) else {
+            continue;
+        };
         for f in x.fields.iter().filter(|f| !f.is_static && f.array.is_none()) {
             if let Some(init) = &f.init {
                 alloc.push(Stmt::set_at(i.field(&f.name), this(), init.clone()));
@@ -448,11 +501,7 @@ fn give_back(root: &str) -> Vec<Stmt> {
 /// `body` for an instance taken (not 0, not given back already).
 fn taken(root: &str, body: Vec<Stmt>) -> Vec<Stmt> {
     let next = format!("si__{root}_V");
-    let cond = Expr::binary(
-        Expr::binary(this(), BinOp::NotEq, Expr::int(0)),
-        BinOp::And,
-        Expr::binary(Expr::Index(next, Box::new(this())), BinOp::Eq, Expr::int(-1)),
-    );
+    let cond = Expr::binary(Expr::binary(this(), BinOp::NotEq, Expr::int(0)), BinOp::And, Expr::binary(Expr::Index(next, Box::new(this())), BinOp::Eq, Expr::int(-1)));
     vec![Stmt::If { branches: vec![(cond, body)], otherwise: None, line: 0 }]
 }
 
@@ -513,7 +562,9 @@ fn register(setup: &mut Vec<Stmt>, triggers: &str, typeid: usize, thunk: &str) {
 /// struct's method.
 fn dispatcher(m: &mut Module, types: &Types, root: &str, name: &str, setup: &mut Vec<Stmt>) {
     // Its signature: the root's, else the first of the family's that has it.
-    let Some((_, me)) = types.method(root, name).or_else(|| types.families[root].iter().find_map(|s| types.method(s, name))) else { return };
+    let Some((_, me)) = types.method(root, name).or_else(|| types.families[root].iter().find_map(|s| types.method(s, name))) else {
+        return;
+    };
     let me = me.clone();
     let o = Origin::file("the build");
     let triggers = format!("wcb__dt_{root}_{name}");
@@ -549,7 +600,9 @@ fn dispatcher(m: &mut Module, types: &Types, root: &str, name: &str, setup: &mut
     f.sig.returns = me.returns.clone();
     m.functions.push(f);
     for s in &types.families[root] {
-        let Some((owner, x)) = types.method(s, name) else { continue };
+        let Some((owner, x)) = types.method(s, name) else {
+            continue;
+        };
         if x.abstract_ {
             continue;
         }
@@ -639,20 +692,23 @@ fn function_pointers(m: &mut Module, types: &Types, pointers: &Pointers, setup: 
 }
 
 /// Locals' types (`thistype` made its struct), into `types`.
-fn local_types(body: &mut [Stmt], this_type: &dyn Fn(&str) -> String, types: &mut HashMap<String, String>) {
+fn local_types(body: &mut [Stmt], this_type: &dyn Fn(&str) -> String, types: &mut HashMap<String, String>, arrays: &mut HashSet<String>) {
     for s in body {
         match s {
-            Stmt::Local { ty, name, .. } => {
+            Stmt::Local { ty, name, array, .. } => {
                 *ty = this_type(ty);
                 types.insert(name.clone(), ty.clone());
-            }
-            Stmt::If { branches, otherwise, .. } => {
-                branches.iter_mut().for_each(|(_, b)| local_types(b, this_type, types));
-                if let Some(b) = otherwise {
-                    local_types(b, this_type, types);
+                if *array {
+                    arrays.insert(name.clone());
                 }
             }
-            Stmt::Loop { body, .. } => local_types(body, this_type, types),
+            Stmt::If { branches, otherwise, .. } => {
+                branches.iter_mut().for_each(|(_, b)| local_types(b, this_type, types, arrays));
+                if let Some(b) = otherwise {
+                    local_types(b, this_type, types, arrays);
+                }
+            }
+            Stmt::Loop { body, .. } => local_types(body, this_type, types, arrays),
             _ => {}
         }
     }
@@ -683,6 +739,9 @@ struct Cx<'a> {
     params: &'a HashMap<String, Vec<String>>,
     globals: &'a HashMap<String, String>,
     locals: &'a HashMap<String, String>,
+    /// The locals and globals that are arrays.
+    arrays: &'a HashSet<String>,
+    global_arrays: &'a HashSet<String>,
     /// The struct of the method.
     current: Option<&'a str>,
     file: &'a str,
@@ -738,6 +797,112 @@ impl Cx<'_> {
         self.locals.get(n).or_else(|| self.globals.get(n)).cloned()
     }
 
+    fn is_array(&self, n: &str) -> bool {
+        if self.locals.contains_key(n) { self.arrays.contains(n) } else { self.global_arrays.contains(n) }
+    }
+
+    /// Has `t` (or a parent) the operator `op` (`x`, `x=`, `[]`, `[]=`, `<`)?
+    fn has_operator(&self, t: &str, op: &str) -> bool {
+        self.types.infos.contains_key(t) && self.types.method(t, &format!("operator {op}")).is_some()
+    }
+
+    /// A call of `t`'s operator `op` (which it has), of `instance` but for
+    /// a static one.
+    fn operator(&self, t: &str, instance: Option<Expr>, op: &str, mut args: Vec<Expr>, line: usize, errors: &mut Vec<Error>) -> (Expr, Option<String>) {
+        let name = format!("operator {op}");
+        let (owner, x) = self.types.method(t, &name).expect("has_operator");
+        if self.types.dispatches(t, &name) {
+            self.error(errors, line, format!("{t}'s `operator {op}` by the instance's type (an interface's) isn't built into JASS yet"));
+            return (Expr::lit("0"), None);
+        }
+        if !x.is_static {
+            match instance {
+                Some(o) => args.insert(0, o),
+                None => {
+                    self.error(errors, line, format!("{t}'s `operator {op}`: an instance's"));
+                    return (Expr::lit("0"), None);
+                }
+            }
+        }
+        (Expr::Call(Call { name: owner.method(&name), args }), x.returns.clone())
+    }
+
+    /// What `.name` is of: a struct by its name (no instance), or an
+    /// instance (its type, and it).
+    fn object(&self, object: Expr, name: &str, line: usize, errors: &mut Vec<Error>) -> Option<(String, Option<Expr>)> {
+        if let Some(info) = self.struct_named(&object) {
+            return Some((info.name.clone(), None));
+        }
+        let (o, t) = self.expr(object, line, errors);
+        match t.filter(|t| self.types.infos.contains_key(t)) {
+            Some(t) => Some((t, Some(o))),
+            None => {
+                self.error(errors, line, format!("`.{name}` of what isn't a struct (or whose type can't be told)"));
+                None
+            }
+        }
+    }
+
+    /// `.name` read: a field, or the operator `name`.
+    fn member(&self, t: String, instance: Option<Expr>, name: &str, line: usize, errors: &mut Vec<Error>) -> (Expr, Option<String>) {
+        if self.types.field(&t, name).is_none() && self.has_operator(&t, name) {
+            return self.operator(&t, instance, name, vec![], line, errors);
+        }
+        // What a `delegate` has: `a.x` is `a.d.x`.
+        if self.types.field(&t, name).is_none()
+            && instance.is_some()
+            && let Some((d, dt)) = self.types.delegate(&t, &|u| self.types.field(u, name).is_some() || self.has_operator(u, name))
+        {
+            let v = self.member(t, instance, &d, line, errors).0;
+            return self.member(dt, Some(v), name, line, errors);
+        }
+        match self.field_of(t, instance, name, None, line, errors) {
+            Some((array, index, ty)) => (index.map_or_else(|| Expr::Var(array.clone()), |i| Expr::Index(array.clone(), Box::new(i))), Some(ty)),
+            None => (Expr::lit("0"), None),
+        }
+    }
+
+    /// `v[i]` of what isn't an array: its type's `operator []`.
+    fn element(&self, v: Expr, t: Option<String>, i: Expr, line: usize, errors: &mut Vec<Error>) -> (Expr, Option<String>) {
+        match t.filter(|t| self.has_operator(t, "[]")) {
+            Some(t) => self.operator(&t, Some(v), "[]", vec![i], line, errors),
+            None => {
+                self.error(errors, line, "an element of what's no array and has no `operator []`".into());
+                (Expr::lit("0"), None)
+            }
+        }
+    }
+
+    /// `set v[i] = value` of what isn't an array: its type's `operator []=`.
+    fn set_element(&self, v: Expr, t: Option<String>, i: Expr, value: Expr, line: usize, errors: &mut Vec<Error>) -> Stmt {
+        match t.filter(|t| self.has_operator(t, "[]=")) {
+            Some(t) => self.call_stmt(self.operator(&t, Some(v), "[]=", vec![i, value], line, errors).0, line),
+            None => {
+                self.error(errors, line, "an element set of what's no array and has no `operator []=`".into());
+                Stmt::Call { call: Call { name: "DoNothing".into(), args: vec![] }, line }
+            }
+        }
+    }
+
+    fn call_stmt(&self, e: Expr, line: usize) -> Stmt {
+        match e {
+            Expr::Call(call) => Stmt::Call { call, line },
+            _ => Stmt::Call { call: Call { name: "DoNothing".into(), args: vec![] }, line },
+        }
+    }
+
+    /// `x[i]` of a name: an array's element, else the operator `[]` of
+    /// the variable's struct (or of the struct so named, static).
+    fn indexed(&self, n: &str) -> Option<(String, Option<Expr>)> {
+        if self.is_array(n) {
+            return None;
+        }
+        if let Some(t) = self.type_of_var(n) {
+            return Some((t, Some(Expr::Var(n.to_string()))));
+        }
+        self.struct_named(&Expr::Var(n.to_string())).map(|i| (i.name.clone(), None))
+    }
+
     fn stmts(&self, body: Vec<Stmt>, errors: &mut Vec<Error>) -> Vec<Stmt> {
         body.into_iter().map(|s| self.stmt(s, errors)).collect()
     }
@@ -745,17 +910,21 @@ impl Cx<'_> {
     fn stmt(&self, s: Stmt, errors: &mut Vec<Error>) -> Stmt {
         match s {
             Stmt::Local { ty, name, array, init, line } => Stmt::Local { ty, name, array, init: init.map(|e| self.expr(e, line, errors).0), line },
+            Stmt::Set { name, index: Some(i), value, line } if self.indexed(&name).is_some_and(|(t, _)| self.has_operator(&t, "[]=")) => {
+                let (t, o) = self.indexed(&name).unwrap();
+                let i = self.expr(i, line, errors).0;
+                let value = self.expr(value, line, errors).0;
+                self.call_stmt(self.operator(&t, o, "[]=", vec![i, value], line, errors).0, line)
+            }
             Stmt::Set { name, index, value, line } => Stmt::Set { name, index: index.map(|e| self.expr(e, line, errors).0), value: self.expr(value, line, errors).0, line },
             Stmt::Call { call, line } => match self.expr(Expr::Call(call), line, errors).0 {
                 Expr::Call(call) => Stmt::Call { call, line },
                 // A cast called for nothing.
                 _ => Stmt::Call { call: Call { name: "DoNothing".into(), args: vec![] }, line },
             },
-            Stmt::If { branches, otherwise, line } => Stmt::If {
-                branches: branches.into_iter().map(|(c, b)| (self.expr(c, line, errors).0, self.stmts(b, errors))).collect(),
-                otherwise: otherwise.map(|b| self.stmts(b, errors)),
-                line,
-            },
+            Stmt::If { branches, otherwise, line } => {
+                Stmt::If { branches: branches.into_iter().map(|(c, b)| (self.expr(c, line, errors).0, self.stmts(b, errors))).collect(), otherwise: otherwise.map(|b| self.stmts(b, errors)), line }
+            }
             Stmt::Loop { body, line } => Stmt::Loop { body: self.stmts(body, errors), line },
             Stmt::ExitWhen { cond, line } => Stmt::ExitWhen { cond: self.expr(cond, line, errors).0, line },
             Stmt::Return { value, line } => Stmt::Return { value: value.map(|e| self.expr(e, line, errors).0), line },
@@ -763,8 +932,8 @@ impl Cx<'_> {
             Stmt::SetMember { object, name, index, value, line } => {
                 let value = self.expr(value, line, errors).0;
                 let index = index.map(|e| self.expr(e, line, errors).0);
-                match self.field(object, &name, index, line, errors) {
-                    Some((array, index, _)) => Stmt::Set { name: array, index, value, line },
+                match self.object(object, &name, line, errors) {
+                    Some((t, instance)) => self.set_member(t, instance, &name, index, value, line, errors),
                     None => Stmt::Set { name: "wcb__error".into(), index: None, value, line },
                 }
             }
@@ -776,21 +945,41 @@ impl Cx<'_> {
         }
     }
 
+    /// `set a.name[index] = value`: a field, the operator `name=` or
+    /// `[]=`, or a `delegate`'s.
+    #[allow(clippy::too_many_arguments)]
+    fn set_member(&self, t: String, instance: Option<Expr>, name: &str, index: Option<Expr>, value: Expr, line: usize, errors: &mut Vec<Error>) -> Stmt {
+        let error = |value| Stmt::Set { name: "wcb__error".into(), index: None, value, line };
+        if self.types.field(&t, name).is_none()
+            && !self.has_operator(&t, &format!("{name}="))
+            && instance.is_some()
+            && let Some((d, dt)) = self.types.delegate(&t, &|u| self.types.field(u, name).is_some() || self.has_operator(u, &format!("{name}=")))
+        {
+            let v = self.member(t, instance, &d, line, errors).0;
+            return self.set_member(dt, Some(v), name, index, value, line, errors);
+        }
+        {
+            let field = self.types.field(&t, name).map(|(_, f)| f.3);
+            match (field, index) {
+                // `set a.x = v`: the operator `x=`.
+                (None, None) if self.has_operator(&t, &format!("{name}=")) => self.call_stmt(self.operator(&t, instance, &format!("{name}="), vec![value], line, errors).0, line),
+                // `set a.x[i] = v` of what isn't an array field.
+                (None | Some(false), Some(i)) => {
+                    let (v, vt) = self.member(t, instance, name, line, errors);
+                    self.set_element(v, vt, i, value, line, errors)
+                }
+                (_, index) => match self.field_of(t, instance, name, index, line, errors) {
+                    Some((array, index, _)) => Stmt::Set { name: array, index, value, line },
+                    None => error(value),
+                },
+            }
+        }
+    }
+
     /// A field: the global it's in, the index (none for a static one's),
     /// its type.
-    fn field(&self, object: Expr, name: &str, index: Option<Expr>, line: usize, errors: &mut Vec<Error>) -> Option<(String, Option<Expr>, String)> {
-        let (t, instance) = match self.struct_named(&object) {
-            Some(info) => (info.name.clone(), None),
-            None => {
-                let (o, t) = self.expr(object, line, errors);
-                let Some(t) = t.filter(|t| self.types.infos.contains_key(t)) else {
-                    self.error(errors, line, format!("`.{name}` of what isn't a struct (or whose type can't be told)"));
-                    return None;
-                };
-                (t, Some(o))
-            }
-        };
-        let Some((owner, (ty, is_static, k))) = self.types.field(&t, name) else {
+    fn field_of(&self, t: String, instance: Option<Expr>, name: &str, index: Option<Expr>, line: usize, errors: &mut Vec<Error>) -> Option<(String, Option<Expr>, String)> {
+        let Some((owner, (ty, is_static, k, _))) = self.types.field(&t, name) else {
             self.error(errors, line, format!("struct {t} has no field {name}"));
             return None;
         };
@@ -815,8 +1004,13 @@ impl Cx<'_> {
                 (Expr::Var(n), t)
             }
             Expr::Index(n, i) => {
+                let i = self.expr(*i, line, errors).0;
+                // `x[i]` of a struct with `operator []`, `S[i]` of a static one.
+                if let Some((t, o)) = self.indexed(&n).filter(|(t, _)| self.has_operator(t, "[]")) {
+                    return self.operator(&t, o, "[]", vec![i], line, errors);
+                }
                 let t = self.type_of_var(&n);
-                (Expr::Index(n, Box::new(self.expr(*i, line, errors).0)), t)
+                (Expr::Index(n, Box::new(i)), t)
             }
             Expr::Call(Call { name, args }) => {
                 let mut args: Vec<Expr> = args.into_iter().map(|a| self.expr(a, line, errors).0).collect();
@@ -863,24 +1057,34 @@ impl Cx<'_> {
                 {
                     return (Expr::int(info.typeid), Some("integer".into()));
                 }
-                match self.field(*object, &name, None, line, errors) {
-                    Some((array, index, ty)) => (index.map_or_else(|| Expr::Var(array.clone()), |i| Expr::Index(array.clone(), Box::new(i))), Some(ty)),
+                match self.object(*object, &name, line, errors) {
+                    Some((t, instance)) => self.member(t, instance, &name, line, errors),
                     None => (Expr::lit("0"), None),
                 }
             }
-            Expr::Element(a, i) => match *a {
-                Expr::Member(object, name) => {
-                    let i = self.expr(*i, line, errors).0;
-                    match self.field(*object, &name, Some(i), line, errors) {
-                        Some((array, Some(index), ty)) => (Expr::Index(array, Box::new(index)), Some(ty)),
-                        _ => (Expr::lit("0"), None),
+            Expr::Element(a, i) => {
+                let i = self.expr(*i, line, errors).0;
+                match *a {
+                    Expr::Member(object, name) => {
+                        let Some((t, instance)) = self.object(*object, &name, line, errors) else {
+                            return (Expr::lit("0"), None);
+                        };
+                        // An array field's element.
+                        if self.types.field(&t, &name).is_some_and(|(_, f)| f.3) {
+                            return match self.field_of(t, instance, &name, Some(i), line, errors) {
+                                Some((array, Some(index), ty)) => (Expr::Index(array, Box::new(index)), Some(ty)),
+                                _ => (Expr::lit("0"), None),
+                            };
+                        }
+                        let (v, vt) = self.member(t, instance, &name, line, errors);
+                        self.element(v, vt, i, line, errors)
+                    }
+                    a => {
+                        let (v, vt) = self.expr(a, line, errors);
+                        self.element(v, vt, i, line, errors)
                     }
                 }
-                _ => {
-                    self.error(errors, line, "an element of what isn't a field".into());
-                    (Expr::lit("0"), None)
-                }
-            },
+            }
             Expr::Method(m) => self.method(*m, line, errors),
             Expr::Unary(op, x) => {
                 let (x, t) = self.expr(*x, line, errors);
@@ -888,7 +1092,18 @@ impl Cx<'_> {
             }
             Expr::Binary(a, op, b) => {
                 let (a, t) = self.expr(*a, line, errors);
-                let b = self.expr(*b, line, errors).0;
+                let (b, tb) = self.expr(*b, line, errors);
+                // `a < b` of structs with `operator <` (`a > b` is `b < a`,
+                // `a <= b` is `not (b < a)`, `a >= b` is `not (a < b)`).
+                if matches!(op, BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq)
+                    && let Some(st) = t.clone().filter(|t| self.has_operator(t, "<")).or_else(|| tb.filter(|t| self.has_operator(t, "<")))
+                {
+                    let (x, y) = if matches!(op, BinOp::Lt | BinOp::GtEq) { (a, b) } else { (b, a) };
+                    let lt = self.operator(&st, Some(x), "<", vec![y], line, errors).0;
+                    let e = if matches!(op, BinOp::LtEq | BinOp::GtEq) { Expr::Unary(UnaryOp::Not, Box::new(lt)) } else { lt };
+                    return (e, Some("boolean".into()));
+                }
+                let t = if matches!(op, BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq | BinOp::And | BinOp::Or) { Some("boolean".into()) } else { t };
                 (Expr::Binary(Box::new(a), op, Box::new(b)), t)
             }
             e @ Expr::Literal(_) => (e, None),
@@ -996,9 +1211,17 @@ impl Cx<'_> {
             self.error(errors, line, format!(".{name}() of what isn't a struct (or whose type can't be told)"));
             return (Expr::lit("0"), None);
         };
+        self.instance_method(o, t, name, args, line, errors)
+    }
+
+    /// `o.name(args)` of an instance `o` of `t`.
+    fn instance_method(&self, o: Expr, t: String, name: String, mut args: Vec<Expr>, line: usize, errors: &mut Vec<Error>) -> (Expr, Option<String>) {
+        let call = |name: String, args: Vec<Expr>| Expr::Call(Call { name, args });
         let several = self.types.several(&t);
         match name.as_str() {
-            "destroy" if several => return (call(format!("s__{}__destroy", self.types.root(&t)), vec![o]), None),
+            "destroy" if several => {
+                return (call(format!("s__{}__destroy", self.types.root(&t)), vec![o]), None);
+            }
             // A struct alone's own, unless it has a method of the name.
             "destroy" | "deallocate" if self.types.method(&t, &name).is_none() => {
                 let info = &self.types.infos[&t];
@@ -1007,8 +1230,17 @@ impl Cx<'_> {
                 }
             }
             // `x.getType()`: the instance's type.
-            "getType" if several => return (Expr::Index(self.types.type_global(&t), Box::new(o)), Some("integer".into())),
+            "getType" if several => {
+                return (Expr::Index(self.types.type_global(&t), Box::new(o)), Some("integer".into()));
+            }
             _ => {}
+        }
+        // What a `delegate` has: `a.m()` is `a.d.m()`.
+        if self.types.method(&t, &name).is_none()
+            && let Some((d, dt)) = self.types.delegate(&t, &|u| self.types.method(u, &name).is_some())
+        {
+            let v = self.member(t, Some(o), &d, line, errors).0;
+            return self.instance_method(v, dt, name, args, line, errors);
         }
         let Some((owner, x)) = self.types.method(&t, &name) else {
             self.error(errors, line, format!("struct {t} has no method {name}"));

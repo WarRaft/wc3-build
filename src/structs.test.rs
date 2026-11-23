@@ -48,7 +48,6 @@ pub(crate) fn as_the_games(out: &str) {
     assert!(problems.is_empty(), "{problems:?}\n{out}");
 }
 
-
 const COUNTERS: &str = r#"// @dialect vjass
 library Counters
     module Counted
@@ -141,13 +140,9 @@ fn structs_into_jass() {
 
 #[test]
 fn what_structs_cant_be() {
-    let src = "// @dialect vjass\ninterface I\n    method f takes nothing returns nothing\nendinterface\nstruct S extends I\n    T d\n    delegate T e\nendstruct\nstruct T\nendstruct\nfunction F takes nothing returns nothing\n    local integer i = 0\n    call i.g()\nendfunction\n";
+    let src = "// @dialect vjass\ninterface I\n    method f takes nothing returns nothing\nendinterface\nstruct S extends I\n    T d\n    static delegate T e\nendstruct\nstruct T\nendstruct\nfunction F takes nothing returns nothing\n    local integer i = 0\n    call i.g()\nendfunction\n";
     let found = build(&[("e.j", src)]).unwrap_err();
-    assert_eq!(
-        found,
-        ["struct S: `delegate` isn't built into JASS yet", "struct S has no method f of interface I", ".g() of what isn't a struct (or whose type can't be told)"],
-        "{found:#?}"
-    );
+    assert_eq!(found, ["struct S: `delegate` e, static or an array isn't built into JASS yet", "struct S has no method f of interface I", ".g() of what isn't a struct (or whose type can't be told)"], "{found:#?}");
 }
 
 #[test]
@@ -347,4 +342,121 @@ endlibrary
     let e = build(&[("f.j", src)]).unwrap_err();
     assert!(e.iter().any(|m| m.contains("Op.Real: Real doesn't take and return what Op does")), "{e:?}");
     assert!(e.iter().any(|m| m.contains("Op.Nothing: no function Nothing")), "{e:?}");
+}
+
+#[test]
+fn operators_as_jasshelpers() {
+    let src = r#"// @dialect vjass
+library O
+    struct V
+        integer raw
+        integer array cell[4]
+        static integer made = 0
+        method operator x takes nothing returns integer
+            return .raw
+        endmethod
+        method operator x= takes integer v returns nothing
+            set .raw = v
+        endmethod
+        method operator [] takes integer i returns integer
+            return .cell[i]
+        endmethod
+        method operator []= takes integer i, integer v returns nothing
+            set .cell[i] = v
+        endmethod
+        method operator < takes V other returns boolean
+            return .raw < other.raw
+        endmethod
+        static method operator count takes nothing returns integer
+            return thistype.made
+        endmethod
+    endstruct
+    struct ById extends array
+        static method operator [] takes integer id returns thistype
+            return id - 100
+        endmethod
+    endstruct
+    struct Holder
+        V v
+    endstruct
+    function Go takes nothing returns nothing
+        local V a = V.create()
+        local V b = V.create()
+        local V array list
+        local Holder h = Holder.create()
+        local ById k = ById[105]
+        set a.x = 3
+        set b.x = a.x + 1
+        set a[2] = a[1]
+        set h.v[0] = h.v[1]
+        set list[0] = a
+        if a < b or a > b or a <= b or a >= b then
+            call BJDebugMsg(I2S(V.count))
+        endif
+    endfunction
+endlibrary
+"#;
+    let out = build(&[("o.j", src)]).unwrap_or_else(|e| panic!("{e:?}"));
+    for part in [
+        "function s__V__get_x takes integer this returns integer",
+        "function s__V__set_x takes integer this, integer v returns nothing",
+        "function s__V__getindex takes integer this, integer i returns integer",
+        "function s__V__setindex takes integer this, integer i, integer v returns nothing",
+        "function s__V__lt takes integer this, integer other returns boolean\nreturn s__V_raw[this] < s__V_raw[other]",
+        "function s__V__get_count takes nothing returns integer",
+        "local integer k = s__ById__getindex(105)",
+        "call s__V__set_x(a, 3)",
+        "call s__V__set_x(b, s__V__get_x(a) + 1)",
+        "call s__V__setindex(a, 2, s__V__getindex(a, 1))",
+        "call s__V__setindex(s__Holder_v[h], 0, s__V__getindex(s__Holder_v[h], 1))",
+        "set list[0] = a",
+        "if s__V__lt(a, b) or s__V__lt(b, a) or not s__V__lt(b, a) or not s__V__lt(a, b) then",
+        "call BJDebugMsg(I2S(s__V__get_count()))",
+    ] {
+        assert!(out.contains(part), "{part}\nnot in:\n{out}");
+    }
+}
+
+#[test]
+fn what_a_delegate_has() {
+    let src = r#"// @dialect vjass
+library D
+    struct Inner
+        integer hp
+        method operator mana takes nothing returns integer
+            return 5
+        endmethod
+        method operator mana= takes integer v returns nothing
+        endmethod
+        method heal takes integer by returns nothing
+            set .hp = .hp + by
+        endmethod
+    endstruct
+    struct Middle
+        delegate Inner inner
+    endstruct
+    struct Outer
+        integer own
+        delegate Middle middle
+        method heal2 takes nothing returns nothing
+            call .heal(2)
+        endmethod
+    endstruct
+    function Go takes nothing returns nothing
+        local Outer o = Outer.create()
+        set o.hp = o.hp + o.own
+        set o.mana = o.mana
+        call o.heal(1)
+    endfunction
+endlibrary
+"#;
+    let out = build(&[("d.j", src)]).unwrap_or_else(|e| panic!("{e:?}"));
+    for part in [
+        "set s__Inner_hp[s__Middle_inner[s__Outer_middle[o]]] = s__Inner_hp[s__Middle_inner[s__Outer_middle[o]]] + s__Outer_own[o]",
+        "call s__Inner__set_mana(s__Middle_inner[s__Outer_middle[o]], s__Inner__get_mana(s__Middle_inner[s__Outer_middle[o]]))",
+        "call s__Inner_heal(s__Middle_inner[s__Outer_middle[o]], 1)",
+        "call s__Inner_heal(s__Middle_inner[s__Outer_middle[this]], 2)",
+    ] {
+        assert!(out.contains(part), "{part}\nnot in:\n{out}");
+    }
 }
