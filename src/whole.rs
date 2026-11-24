@@ -56,6 +56,8 @@ pub struct Input<'a> {
     pub code: Vec<Code>,
     /// Shorter names ([`crate::uglify`]).
     pub uglify: bool,
+    /// The language written ([`crate::jass::Script`]).
+    pub script: crate::jass::Script,
     /// Where JassHelper's `//! import "path"` in a file of the code leads
     /// ([`crate::preprocess::Import`]).
     pub import: &'a crate::preprocess::Import<'a>,
@@ -147,7 +149,7 @@ pub fn script(input: &Input) -> Result<Script, Vec<Error>> {
     whole.append(crate::map::end(&map));
     // The game's natives and functions, for hooks of them.
     let game = ["Scripts\\common.j", "Scripts\\Blizzard.j"].iter().filter_map(|n| text(n)).flat_map(|t| crate::from_jass::signatures(&t)).collect();
-    let built = crate::jass::build_with(&whole, &crate::jass::Options { uglify: input.uglify, game })?;
+    let built = crate::jass::build_with(&whole, &crate::jass::Options { uglify: input.uglify, game, script: input.script })?;
     Ok(Script { text: built.script, notes: built.notes })
 }
 

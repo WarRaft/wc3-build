@@ -21,3 +21,7 @@ slk-rs = { path = "../slk-rs" }
 wtg-rs = { path = "../wtg-rs" }
 doo-rs = { path = "../doo-rs" }
 w3abdhqtu-rs = { path = "../w3abdhqtu-rs" }
+
+[dev-dependencies]
+# The Lua a build writes, read back.
+lua-rs = { path = "../lua-rs" }

@@ -7,6 +7,7 @@ pub mod from_zinc;
 pub mod ir;
 pub mod jass;
 pub mod lower;
+pub mod lua;
 pub mod map;
 pub mod objects;
 pub mod placed;

@@ -44,6 +44,41 @@ pub struct Options {
     /// the code calls without declaring, for what a hook of one takes and
     /// gives back.
     pub game: Vec<Signature>,
+    /// The language written ([`Script`]).
+    pub script: Script,
+}
+
+/// The language a build writes the script in (`[build] script=`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Script {
+    /// The game's JASS (`war3map.j`).
+    #[default]
+    Jass,
+    /// The game's Lua (`war3map.lua`, [`crate::lua`]).
+    Lua,
+    /// UjAPI's AngelScript: not written yet.
+    AngelScript,
+}
+
+impl Script {
+    /// By its name in `wc3.bni`: `jass`, `lua`, `as`.
+    pub fn from_name(name: &str) -> Option<Script> {
+        match name {
+            "jass" => Some(Script::Jass),
+            "lua" => Some(Script::Lua),
+            "as" => Some(Script::AngelScript),
+            _ => None,
+        }
+    }
+
+    /// Its script's extension: `j`, `lua`, `as`.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Script::Jass => "j",
+            Script::Lua => "lua",
+            Script::AngelScript => "as",
+        }
+    }
 }
 
 /// What a build made: the script, and what it says about it.
@@ -88,7 +123,12 @@ pub fn build_with(m: &Module, options: &Options) -> Result<Built, Vec<Error>> {
     if options.uglify {
         notes = crate::uglify::uglify(&mut m).kept;
     }
-    Ok(Built { script: print(&m), notes })
+    let script = match options.script {
+        Script::Jass => print(&m),
+        Script::Lua => crate::lua::print(&m, &options.game),
+        Script::AngelScript => return Err(vec![Error { origin: Origin::file("the build"), message: "AngelScript (script=as) isn't written yet".into() }]),
+    };
+    Ok(Built { script, notes })
 }
 
 /// Is `f` a `main` or a `config` the build merges?
