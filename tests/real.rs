@@ -51,7 +51,7 @@ fn real_scripts() {
         assert_eq!(after, before, "{}", p.display());
         // Shorter names: the same problems, by rule (names in them differ).
         let module = wc3_build::from_jass::module(&[Source { name: &p.to_string_lossy(), text: &src }]).unwrap();
-        let short = wc3_build::jass::build_with(&module, &wc3_build::jass::Options { uglify: true }).unwrap();
+        let short = wc3_build::jass::build_with(&module, &wc3_build::jass::Options { uglify: true, ..Default::default() }).unwrap();
         let rules = |text: &str| {
             let program = jass_rs::parse(text).unwrap_or_else(|e| panic!("line {}: {}", e.line, e.message));
             let mut r: Vec<&'static str> = jass_rs::names::check(&program, &[&env]).into_iter().map(|d| d.rule).collect();

@@ -33,34 +33,79 @@ pub fn module(files: &[Source]) -> Result<Module, Vec<Error>> {
 /// [`module`], a file without a `// @dialect` header read as `fallback`
 /// (a `.vj` one as vJASS): the project's dialect.
 pub fn module_as(files: &[Source], fallback: jass_rs::Dialect) -> Result<Module, Vec<Error>> {
+    let given: Vec<(Source, jass_rs::Dialect)> = files.iter().map(|f| (Source { name: f.name, text: f.text }, fallback)).collect();
+    module_with(&given, &|_, _| None)
+}
+
+/// The module of `files` (each with the dialect it's read in without a
+/// header), in their order, JassHelper's preprocessor run over them all
+/// first ([`crate::preprocess`]: macros, `novjass`, imports found by
+/// `import`); what's said of the code is said of the lines written.
+pub fn module_with(files: &[(Source, jass_rs::Dialect)], import: &crate::preprocess::Import) -> Result<Module, Vec<Error>> {
+    let given: Vec<(&str, &str)> = files.iter().map(|(f, _)| (f.name, f.text)).collect();
+    let expanded = crate::preprocess::expand(&given, import)?;
     let mut m = Module::default();
     let mut errors = Vec::new();
-    for f in files {
-        if f.name.to_ascii_lowercase().ends_with(".zn") {
-            match zinc_rs::parse(f.text) {
-                Ok(p) => crate::from_zinc::add(&mut m, f, &p, &mut errors),
-                Err(e) => errors.push(Error { origin: Origin { file: f.name.into(), line: e.line }, message: e.message }),
-            }
-            continue;
+    for (k, e) in expanded.iter().enumerate() {
+        // An imported file: the dialect of the file it came from at first.
+        let mut root = k;
+        while let Some(by) = expanded[root].imported_by {
+            root = by;
         }
-        // JassHelper's preprocessor first: a file that has it may not even
-        // parse without it.
-        let directives = directives(f);
-        if !directives.is_empty() {
-            errors.extend(directives);
-            continue;
-        }
-        let dialect = jass_rs::lexer::Dialect::declared(f.text).unwrap_or(if f.name.to_ascii_lowercase().ends_with(".vj") { jass_rs::Dialect::VJass } else { fallback });
-        match jass_rs::parse_with(f.text, dialect) {
-            Ok(p) => add(&mut m, f, &p, &mut errors),
-            Err(e) => errors.push(Error { origin: Origin { file: f.name.into(), line: e.line }, message: e.message }),
-        }
+        let fallback = files.get(root).map_or(jass_rs::Dialect::Jass, |(_, d)| *d);
+        let f = Source { name: &e.name, text: &e.text };
+        let mut one = Module::default();
+        let mut errs = Vec::new();
+        one_file(&mut one, &f, fallback, &mut errs);
+        // Back to the lines written.
+        // (Past the last, as an error at the end of a file can be: the last.)
+        let line = |l: usize| if l == 0 { 0 } else { e.lines.get(l - 1).or(e.lines.last()).copied().unwrap_or(l) };
+        one.map_lines(&line);
+        errs.iter_mut().for_each(|x| x.origin.line = line(x.origin.line));
+        errors.extend(errs);
+        m.append(one);
     }
     if errors.is_empty() { Ok(m) } else { Err(errors) }
 }
 
+/// One file into `m`: Zinc (a `.zn`), else JASS or vJASS.
+fn one_file(m: &mut Module, f: &Source, fallback: jass_rs::Dialect, errors: &mut Vec<Error>) {
+    if f.name.to_ascii_lowercase().ends_with(".zn") {
+        match zinc_rs::parse(f.text) {
+            Ok(p) => crate::from_zinc::add(m, f, &p, errors),
+            Err(e) => errors.push(Error { origin: Origin { file: f.name.into(), line: e.line }, message: e.message }),
+        }
+        return;
+    }
+    // What JassHelper's preprocessor has that isn't run yet.
+    let directives = directives(f);
+    if !directives.is_empty() {
+        errors.extend(directives);
+        return;
+    }
+    let dialect = jass_rs::lexer::Dialect::declared(f.text).unwrap_or(if f.name.to_ascii_lowercase().ends_with(".vj") { jass_rs::Dialect::VJass } else { fallback });
+    match jass_rs::parse_with(f.text, dialect) {
+        Ok(p) => add(m, f, &p, errors),
+        Err(e) => errors.push(Error { origin: Origin { file: f.name.into(), line: e.line }, message: e.message }),
+    }
+}
+
 /// One JASS expression (`CreateGroup()`, `'hfoo'`, `bj_X + 1`), as the
 /// game's data gives values: what it is, or why it doesn't read.
+/// The natives and functions `text` (a script of the game's: `common.j`,
+/// `Blizzard.j`) declares; none when it doesn't read.
+pub fn signatures(text: &str) -> Vec<Signature> {
+    let Ok(p) = jass_rs::parse(text) else { return Vec::new() };
+    p.items
+        .iter()
+        .filter_map(|i| match i {
+            j::TopLevel::Native(s) => Some(signature(s)),
+            j::TopLevel::Function(f) => Some(signature(&f.sig)),
+            _ => None,
+        })
+        .collect()
+}
+
 pub fn expr(text: &str) -> Result<Expr, String> {
     let src = format!("function F takes nothing returns nothing\n    return {text}\nendfunction\n");
     let p = jass_rs::parse(&src).map_err(|e| format!("{text:?}: {}", e.message))?;
@@ -76,7 +121,8 @@ pub fn expr(text: &str) -> Result<Expr, String> {
 }
 
 /// JassHelper's preprocessor directives, which aren't read.
-const DIRECTIVES: [&str; 8] = ["textmacro", "endtextmacro", "runtextmacro", "inject", "endinject", "import", "novjass", "loaddata"];
+/// JassHelper's directives not run yet (the rest are [`crate::preprocess`]'s).
+const DIRECTIVES: [&str; 5] = ["inject", "endinject", "dovjassinit", "loaddata", "external"];
 
 /// Each of JassHelper's preprocessor directives in a file: an error.
 fn directives(f: &Source) -> Vec<Error> {
@@ -107,7 +153,7 @@ fn owner(scope: Option<&str>, m: &j::Modifiers) -> Owner {
     Owner { scope: scope.map(String::from), access }
 }
 
-fn signature(s: &j::FunctionSig) -> Signature {
+pub(crate) fn signature(s: &j::FunctionSig) -> Signature {
     Signature {
         name: s.name.clone(),
         params: s.params.iter().map(|p| Param { ty: p.type_name.clone(), name: p.name.clone() }).collect(),
@@ -191,6 +237,9 @@ impl Reader<'_> {
                     m.function_types.push(FunctionType { sig: signature(sig), owner: owner(scope, &sig.modifiers), origin: self.origin(sig.line) })
                 }
                 j::TopLevel::Keyword { .. } => {}
+                j::TopLevel::Hook { name, target, line } => {
+                    m.hooks.push(Hook { name: name.clone(), target: target.clone(), owner: owner(scope, &j::Modifiers::default()), origin: self.origin(*line) })
+                }
             }
         }
     }

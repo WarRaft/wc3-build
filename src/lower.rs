@@ -37,6 +37,12 @@ const ORIGIN: &str = "the build";
 /// `m` with its libraries and scopes, initializers, `static if`s and `%`
 /// lowered.
 pub fn lower(m: &Module) -> Result<Module, Vec<Error>> {
+    lower_with(m, &[])
+}
+
+/// [`lower`], with the game's natives and functions (`game`: what a hook
+/// of one takes and gives back).
+pub fn lower_with(m: &Module, game: &[Signature]) -> Result<Module, Vec<Error>> {
     let mut m = m.clone();
     let mut errors = Vec::new();
     let order = library_order(&m, &mut errors);
@@ -87,6 +93,20 @@ pub fn lower(m: &Module) -> Result<Module, Vec<Error>> {
         }
         name.to_string()
     };
+
+    // Hooks, their names resolved in their scopes; made at the end, once
+    // every function is what it becomes (`hooks`).
+    let hooks: Vec<(String, String, Origin)> = std::mem::take(&mut m.hooks)
+        .into_iter()
+        .map(|h| {
+            let scope = h.owner.scope.as_deref();
+            let target = match h.target.split_once('.') {
+                Some((s, method)) => format!("{}.{method}", resolve(scope, s)),
+                None => resolve(scope, &h.target),
+            };
+            (resolve(scope, &h.name), target, h.origin)
+        })
+        .collect();
 
     // Initializers, resolved in their scopes, before names change: the
     // libraries' in their order, then the scopes'.
@@ -267,7 +287,112 @@ pub fn lower(m: &Module) -> Result<Module, Vec<Error>> {
             }
         }
     }
+    apply_hooks(&mut m, hooks, game, &mut errors);
     if errors.is_empty() { Ok(m) } else { Err(errors) }
+}
+
+/// The hooks (each a name, its target, where it's written), as JassHelper
+/// makes them: for each name hooked, `h__<name>` taking what it takes
+/// calls each target (a struct's method `S.m`: its function) in turn,
+/// then the name itself, and gives back what that gives; every call of
+/// the name but in the targets themselves (a hook calling what it hooks
+/// would run itself) is a call of it. A target must take what the name
+/// takes.
+fn apply_hooks(m: &mut Module, hooks: Vec<(String, String, Origin)>, game: &[Signature], errors: &mut Vec<Error>) {
+    if hooks.is_empty() {
+        return;
+    }
+    let sig_of = |m: &Module, n: &str| m.functions.iter().map(|f| &f.sig).chain(m.natives.iter().map(|x| &x.sig)).chain(game).find(|s| s.name == n).cloned();
+    let mut hooked: Vec<(String, Signature, Vec<String>)> = Vec::new();
+    for (name, target, origin) in hooks {
+        let Some(sig) = sig_of(m, &name) else {
+            errors.push(Error { origin, message: format!("hook {name}: no native or function {name}") });
+            continue;
+        };
+        // `S.m`: the struct's method, as the structs made it.
+        let function = match target.split_once('.') {
+            Some((s, method)) => format!("s__{s}_{method}"),
+            None => target.clone(),
+        };
+        let Some(t) = sig_of(m, &function) else {
+            errors.push(Error { origin, message: format!("hook {name} {target}: no function or static method {target}") });
+            continue;
+        };
+        if t.params.iter().map(|p| &p.ty).ne(sig.params.iter().map(|p| &p.ty)) {
+            errors.push(Error { origin, message: format!("hook {name} {target}: {target} doesn't take what {name} takes") });
+            continue;
+        }
+        match hooked.iter_mut().find(|(n, _, _)| *n == name) {
+            Some((_, _, targets)) => targets.push(function),
+            None => hooked.push((name, sig, vec![function])),
+        }
+    }
+    let targets: HashSet<String> = hooked.iter().flat_map(|(_, _, t)| t.iter().cloned()).collect();
+    let wrapper = |n: &str| format!("h__{n}");
+    let names: HashMap<String, String> = hooked.iter().map(|(n, _, _)| (n.clone(), wrapper(n))).collect();
+    for f in m.functions.iter_mut().filter(|f| !targets.contains(&f.sig.name)) {
+        rename_calls(&mut f.body, &names);
+    }
+    for (name, sig, targets) in hooked {
+        let args: Vec<Expr> = sig.params.iter().map(|p| Expr::var(p.name.clone())).collect();
+        let mut body: Vec<Stmt> = targets.into_iter().map(|t| Stmt::call(t, args.clone())).collect();
+        let call = Call { name: name.clone(), args };
+        body.push(match &sig.returns {
+            Some(_) => Stmt::Return { value: Some(Expr::Call(call)), line: 0 },
+            None => Stmt::Call { call, line: 0 },
+        });
+        let mut f = Function::new(wrapper(&name), body, Origin::file(ORIGIN));
+        f.sig.params = sig.params.clone();
+        f.sig.returns = sig.returns.clone();
+        m.functions.push(f);
+    }
+}
+
+/// Every call of a name of `names` in `body` a call of what it maps to.
+fn rename_calls(body: &mut [Stmt], names: &HashMap<String, String>) {
+    fn expr(e: &mut Expr, names: &HashMap<String, String>) {
+        if let Expr::Call(c) = e
+            && let Some(to) = names.get(&c.name)
+        {
+            c.name = to.clone();
+        }
+        for c in e.children_mut() {
+            expr(c, names);
+        }
+    }
+    for s in body {
+        match s {
+            Stmt::Call { call, .. } => {
+                if let Some(to) = names.get(&call.name) {
+                    call.name = to.clone();
+                }
+                call.args.iter_mut().for_each(|a| expr(a, names));
+            }
+            Stmt::Local { init, .. } => init.iter_mut().for_each(|e| expr(e, names)),
+            Stmt::Set { index, value, .. } => {
+                index.iter_mut().for_each(|e| expr(e, names));
+                expr(value, names);
+            }
+            Stmt::If { branches, otherwise, .. } => {
+                for (c, b) in branches {
+                    expr(c, names);
+                    rename_calls(b, names);
+                }
+                if let Some(b) = otherwise {
+                    rename_calls(b, names);
+                }
+            }
+            Stmt::Loop { body, .. } => rename_calls(body, names),
+            Stmt::ExitWhen { cond, .. } => expr(cond, names),
+            Stmt::Return { value, .. } => value.iter_mut().for_each(|e| expr(e, names)),
+            Stmt::Debug { stmt, .. } => rename_calls(std::slice::from_mut(&mut **stmt), names),
+            other => {
+                let (es, bs) = other.oop_parts_mut();
+                es.into_iter().for_each(|e| expr(e, names));
+                bs.into_iter().for_each(|b| rename_calls(b, names));
+            }
+        }
+    }
 }
 
 /// Each struct's modules taken in (theirs too): their fields and

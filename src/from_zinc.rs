@@ -30,7 +30,22 @@ const ANON: &str = "wcb__anon_";
 pub fn add(m: &mut Module, f: &Source, p: &z::Program, errors: &mut Vec<Error>) {
     let lines: Vec<&str> = f.text.lines().collect();
     let next_anon = m.functions.iter().filter(|g| g.sig.name.starts_with(ANON)).count();
-    let mut r = Reader { file: f.name, lines: &lines, m, errors, next_anon, scope: None };
+    let mut r = Reader { file: f.name, lines: &lines, m, errors, next_anon, scope: None, grids: Default::default() };
+    // The arrays of several dimensions first: a function may use one
+    // declared below it.
+    let members = p.globals.iter().chain(p.libraries.iter().flat_map(|l| &l.members));
+    for member in members {
+        let vars: Vec<&z::VarDecl> = match member {
+            z::Member::Var(v) => vec![v],
+            z::Member::Struct(st) => st.members.iter().filter_map(|m| if let z::StructMember::Field(v) = m { Some(v) } else { None }).collect(),
+            _ => Vec::new(),
+        };
+        for v in vars.into_iter().filter(|v| v.dims.len() > 1) {
+            if let Some(rest) = v.dims[1..].iter().cloned().collect::<Option<Vec<_>>>() {
+                r.grids.insert(v.name.clone(), rest);
+            }
+        }
+    }
     for s in &p.stmts {
         r.error(s.line(), "a statement outside a function: move it into one");
     }
@@ -68,6 +83,9 @@ struct Reader<'a> {
     next_anon: usize,
     /// The library being read.
     scope: Option<String>,
+    /// Arrays of more than one dimension: each one's sizes past the first
+    /// (`integer a[10][20]`: `[20]`), for `a[i][j]` as `a[i * 20 + j]`.
+    grids: std::collections::HashMap<String, Vec<z::Expr>>,
 }
 
 impl Reader<'_> {
@@ -181,17 +199,63 @@ impl Reader<'_> {
         (fields, methods, mixins)
     }
 
-    /// An array's size: `None` not an array, `Some(None)` unsized; an
-    /// error (and `None` back) for more than one dimension.
+    /// An array's size: `None` not an array, `Some(None)` unsized. One
+    /// of several dimensions (`a[10][20]`) is one array of them all (200;
+    /// unsized when the first is), as JassHelper makes it: every size
+    /// but the first must be given (an error, and `None` back, else).
     fn dims(&mut self, v: &z::VarDecl) -> Option<Option<Option<Expr>>> {
         match v.dims.as_slice() {
             [] => Some(None),
             [d] => Some(Some(d.as_ref().map(|e| self.expr(e)))),
-            _ => {
-                self.error(v.line, &format!("{}: an array of more than one dimension isn't read yet", v.name));
-                None
+            [first, rest @ ..] => {
+                let Some(rest) = rest.iter().cloned().collect::<Option<Vec<z::Expr>>>() else {
+                    self.error(v.line, &format!("{}: every size of an array of several dimensions but the first must be given", v.name));
+                    return None;
+                };
+                self.grids.insert(v.name.clone(), rest.clone());
+                // Of numbers: the number (a struct's field needs one).
+                let number = |e: &z::Expr| if let z::ExprKind::IntLiteral(n) = e.kind { Some(n) } else { None };
+                let size = first.as_ref().map(|f| match std::iter::once(f).chain(&rest).map(number).collect::<Option<Vec<i64>>>() {
+                    Some(ns) => {
+                        let cells = ns.iter().product::<i64>();
+                        // A JASS array has 8192 cells.
+                        if cells > 8192 {
+                            self.error(v.line, &format!("{}: {cells} cells, past a JASS array's 8192", v.name));
+                        }
+                        Expr::int(cells)
+                    }
+                    None => rest.iter().fold(self.expr(f), |acc, d| Expr::binary(acc, BinOp::Mul, self.expr(d))),
+                });
+                Some(Some(size))
             }
         }
+    }
+
+    /// `a[i][j]` of an array of several dimensions: what's indexed (the
+    /// name, or a member) and the one index it's at (`i * 20 + j`).
+    /// `None` for any other.
+    fn grid_index<'e>(&mut self, e: &'e z::Expr) -> Option<(&'e z::Expr, Expr)> {
+        let mut indices = Vec::new();
+        let mut base = e;
+        while let z::ExprKind::Index(a, i) = &base.kind {
+            indices.push(&**i);
+            base = a;
+        }
+        let name = match &base.kind {
+            z::ExprKind::Var(n) | z::ExprKind::Member(_, n) => n,
+            _ => return None,
+        };
+        let sizes = self.grids.get(name)?.clone();
+        indices.reverse();
+        if indices.len() != sizes.len() + 1 {
+            self.error(e.span.start_line, &format!("{name} has {} dimensions: as many indices", sizes.len() + 1));
+            return None;
+        }
+        let mut at = self.expr(indices[0]);
+        for (i, d) in indices[1..].iter().zip(&sizes) {
+            at = Expr::binary(Expr::binary(at, BinOp::Mul, self.expr(d)), BinOp::Add, self.expr(i));
+        }
+        Some((base, at))
     }
 
     fn global(&mut self, v: &z::VarDecl) -> Option<Global> {
@@ -331,9 +395,12 @@ impl Reader<'_> {
     /// `target = value`: a name, an element of one, a member, or an
     /// element of a member.
     fn set(&mut self, target: &z::Expr, value: Expr, line: usize) -> Option<Stmt> {
-        let (base, index) = match &target.kind {
-            z::ExprKind::Index(a, i) => (&**a, Some(self.expr(i))),
-            _ => (target, None),
+        let (base, index) = match self.grid_index(target) {
+            Some((base, at)) => (base, Some(at)),
+            None => match &target.kind {
+                z::ExprKind::Index(a, i) => (&**a, Some(self.expr(i))),
+                _ => (target, None),
+            },
         };
         match &base.kind {
             z::ExprKind::Var(name) => Some(Stmt::Set { name: name.clone(), index, value, line }),
@@ -359,6 +426,13 @@ impl Reader<'_> {
             K::Var(n) => Expr::var(n.clone()),
             K::Member(object, name) => Expr::Member(Box::new(self.expr(object)), name.clone()),
             K::Index(a, i) => {
+                // Of an array of several dimensions: one index.
+                if let Some((base, at)) = self.grid_index(e) {
+                    return match &base.kind {
+                        K::Var(n) => Expr::Index(n.clone(), Box::new(at)),
+                        _ => Expr::Element(Box::new(self.expr(base)), Box::new(at)),
+                    };
+                }
                 let index = Box::new(self.expr(i));
                 match &a.kind {
                     K::Var(n) => Expr::Index(n.clone(), index),

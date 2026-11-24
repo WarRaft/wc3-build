@@ -38,6 +38,18 @@ pub struct Module {
     pub mixins: Vec<Mixin>,
     /// vJASS's function interfaces: types of functions.
     pub function_types: Vec<FunctionType>,
+    /// vJASS's hooks, as written.
+    pub hooks: Vec<Hook>,
+}
+
+/// vJASS's `hook Name Target`: before every call of `Name`, `Target` (a
+/// function, or a struct's static method `S.m`) with the same arguments.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hook {
+    pub name: String,
+    pub target: String,
+    pub owner: Owner,
+    pub origin: Origin,
 }
 
 /// vJASS's `function interface F takes ... returns ...`.
@@ -546,6 +558,73 @@ impl Origin {
 
 impl Module {
     /// Adds `other`'s items after this one's.
+    /// Every line it says its items and statements are at, as `to` gives
+    /// it (each file's line from the one it was read at).
+    pub fn map_lines(&mut self, to: &dyn Fn(usize) -> usize) {
+        fn body(b: &mut [Stmt], to: &dyn Fn(usize) -> usize) {
+            for s in b {
+                match s {
+                    Stmt::If { branches, otherwise, line } => {
+                        *line = to(*line);
+                        branches.iter_mut().for_each(|(_, b)| body(b, to));
+                        if let Some(b) = otherwise {
+                            body(b, to);
+                        }
+                    }
+                    Stmt::StaticIf { then, otherwise, line, .. } => {
+                        *line = to(*line);
+                        body(then, to);
+                        if let Some(b) = otherwise {
+                            body(b, to);
+                        }
+                    }
+                    Stmt::Loop { body: b, line } => {
+                        *line = to(*line);
+                        body(b, to);
+                    }
+                    Stmt::Debug { stmt, line } => {
+                        *line = to(*line);
+                        body(std::slice::from_mut(&mut **stmt), to);
+                    }
+                    Stmt::Local { line, .. }
+                    | Stmt::Set { line, .. }
+                    | Stmt::Call { line, .. }
+                    | Stmt::ExitWhen { line, .. }
+                    | Stmt::Return { line, .. }
+                    | Stmt::SetMember { line, .. }
+                    | Stmt::CallMethod { line, .. } => *line = to(*line),
+                }
+            }
+        }
+        let function = |f: &mut Function| {
+            f.origin.line = to(f.origin.line);
+            body(&mut f.body, to);
+        };
+        let methods = |ms: &mut Vec<Method>| ms.iter_mut().for_each(|m| function(&mut m.function));
+        let fields = |fs: &mut Vec<Field>| fs.iter_mut().for_each(|f| f.origin.line = to(f.origin.line));
+        self.types.iter_mut().for_each(|t| t.origin.line = to(t.origin.line));
+        self.natives.iter_mut().for_each(|n| n.origin.line = to(n.origin.line));
+        self.globals.iter_mut().for_each(|g| g.origin.line = to(g.origin.line));
+        self.functions.iter_mut().for_each(function);
+        self.libraries.iter_mut().for_each(|l| l.origin.line = to(l.origin.line));
+        for s in &mut self.structs {
+            s.origin.line = to(s.origin.line);
+            fields(&mut s.fields);
+            methods(&mut s.methods);
+        }
+        for i in &mut self.interfaces {
+            i.origin.line = to(i.origin.line);
+            methods(&mut i.methods);
+        }
+        for x in &mut self.mixins {
+            x.origin.line = to(x.origin.line);
+            fields(&mut x.fields);
+            methods(&mut x.methods);
+        }
+        self.function_types.iter_mut().for_each(|t| t.origin.line = to(t.origin.line));
+        self.hooks.iter_mut().for_each(|h| h.origin.line = to(h.origin.line));
+    }
+
     pub fn append(&mut self, other: Module) {
         self.types.extend(other.types);
         self.natives.extend(other.natives);
@@ -556,6 +635,7 @@ impl Module {
         self.interfaces.extend(other.interfaces);
         self.mixins.extend(other.mixins);
         self.function_types.extend(other.function_types);
+        self.hooks.extend(other.hooks);
     }
 
     /// What of vJASS and Zinc the module still has, which only lowering
@@ -577,6 +657,9 @@ impl Module {
         }
         for t in &self.function_types {
             push(&t.origin, format!("function interface {}", t.sig.name));
+        }
+        for h in &self.hooks {
+            push(&h.origin, format!("hook {} {}", h.name, h.target));
         }
         for t in self.types.iter().filter(|t| t.size.is_some()) {
             push(&t.origin, format!("dynamic array type {}", t.name));

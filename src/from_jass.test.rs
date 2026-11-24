@@ -53,9 +53,18 @@ fn vjass_goes_in_as_it_is() {
 }
 
 #[test]
-fn jasshelpers_preprocessor_is_an_error() {
-    let text = "// @dialect vjass\n//! textmacro T takes X\nfunction $X$ takes nothing returns nothing\nendfunction\n//! endtextmacro\n";
+fn jasshelpers_preprocessor_run_first() {
+    // A textmacro of one file run in another; what's said of the code is
+    // said of the line that ran it.
+    let a = "// @dialect vjass\n//! textmacro T takes X\nfunction $X$ takes nothing returns nothing\n    call Nope$X$()\nendfunction\n//! endtextmacro\n";
+    let b = "// @dialect vjass\n\n//! runtextmacro T(\"Made\")\n";
+    let m = module(&[Source { name: "a.j", text: a }, Source { name: "b.j", text: b }]).unwrap_or_else(|e| panic!("{e:?}"));
+    let f = m.functions.iter().find(|f| f.sig.name == "Made").expect("made");
+    assert_eq!((f.origin.file.as_str(), f.origin.line), ("b.j", 3));
+    assert!(matches!(&f.body[0], Stmt::Call { call, line: 3 } if call.name == "NopeMade"), "{:?}", f.body);
+    // What isn't run yet: an error each.
+    let text = "// @dialect vjass\n//! inject main\n//! dovjassinit\n//! endinject\n";
     let errors = module(&[Source { name: "t.j", text }]).unwrap_err();
     let found: Vec<(usize, &str)> = errors.iter().map(|e| (e.origin.line, e.message.as_str())).collect();
-    assert_eq!(found, [(2, "JassHelper's `//! textmacro` isn't read yet"), (5, "JassHelper's `//! endtextmacro` isn't read yet")]);
+    assert_eq!(found, [(2, "JassHelper's `//! inject` isn't read yet"), (3, "JassHelper's `//! dovjassinit` isn't read yet"), (4, "JassHelper's `//! endinject` isn't read yet")]);
 }

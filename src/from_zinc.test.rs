@@ -145,8 +145,27 @@ fn zinc_in_vjass_too() {
 }
 
 #[test]
+fn arrays_of_several_dimensions_are_one() {
+    let m = read(
+        "g.zn",
+        "integer grid[4][5];\nfunction F(integer i, integer j) -> integer {\n    grid[i][j] = 7;\n    real cube[2][3][4];\n    cube[1][i][j] = 1.0;\n    return grid[j][i];\n}\nstruct S { integer cell[3][2]; method put(integer r) { this.cell[r][1] = r; } }\n",
+    );
+    let out = jass(&m);
+    for part in [
+        "integer array grid",
+        "set grid[i * 5 + j] = 7",
+        "local real array cube",
+        "set cube[(1 * 3 + i) * 4 + j] = 1.0",
+        "return grid[j * 5 + i]",
+        "set s__S_cell[this * 6 + (r * 2 + 1)] = r",
+    ] {
+        assert!(out.contains(part), "{part}\nnot in:\n{out}");
+    }
+}
+
+#[test]
 fn what_isnt_read_is_an_error() {
-    let errors = module(&[Source { name: "d.zn", text: "integer grid[2][2];\nfunction F() { integer a[2][3]; }\n" }]).unwrap_err();
+    let errors = module(&[Source { name: "d.zn", text: "integer grid[2][];\ninteger ok[2][2];\nfunction F() { ok[1] = 0; }\ninteger big[100][100];\n" }]).unwrap_err();
     let messages: Vec<(usize, &str)> = errors.iter().map(|e| (e.origin.line, e.message.as_str())).collect();
-    assert_eq!(messages, [(1, "grid: an array of more than one dimension isn't read yet"), (2, "a: an array of more than one dimension isn't read yet")]);
+    assert_eq!(messages, [(1, "grid: every size of an array of several dimensions but the first must be given"), (3, "ok has 2 dimensions: as many indices"), (4, "big: 10000 cells, past a JASS array's 8192")]);
 }

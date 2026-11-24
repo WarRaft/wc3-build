@@ -21,13 +21,26 @@ into it as code too.
   are: what `a` is takes the types, which lowering has (the build's stage
   4). Each item knows its file and line (`Origin`) for errors; a literal
   is kept as it was written (`'hfoo'`, `$FF`, `.5`).
+- **`preprocess`**: JassHelper's preprocessor, on all the code at once,
+  before any of it is read (`from_jass::module_with`): `//! import
+  [vjass|zinc|comment] "path"` (each file once, as a file of its own;
+  where the path leads is the caller's: the project's build looks beside
+  the importing file, then in the project's folder, then in its layers),
+  `//! textmacro NAME [takes a, b]` ... `//! endtextmacro` (two of a
+  name an error; `textmacro_once` may be declared again, the first
+  kept), `//! runtextmacro [optional] NAME("x", ...)` (its lines in its
+  place, `$a$` the argument, its own `runtextmacro`s run too, 64 deep at
+  most; `optional`: nothing without the macro), `//! novjass` ...
+  `//! endnovjass` (left out). Each line made keeps where it comes from:
+  a macro's, the line of the `runtextmacro` that put it there, so what's
+  said of the code is said of the lines written (`Module::map_lines`).
+  `//! inject`, `//! dovjassinit`, `//! loaddata`, `//! external` aren't
+  run yet: an error each, nothing lost quietly.
 - **`from_jass`**: JASS and vJASS files (parsed by `jass-rs`) into one
   module, in their order; a `.zn` file and a `//! zinc` block go to
-  `from_zinc`. A statement outside a function is an error, and so is
-  each of JassHelper's preprocessor directives (`//! textmacro`,
-  `//! runtextmacro`, `//! inject` ...), checked before the file is
-  parsed: none is read yet, and none is lost quietly. A `static if` with
-  `elseif`s is one in each one's `else`; a `keyword` is left out.
+  `from_zinc`. A statement outside a function is an error. A `static
+  if` with `elseif`s is one in each one's `else`; a `keyword` is left
+  out; a `hook` goes in as it is (`lower` makes it).
 - **`from_zinc`**: Zinc into the same IR. A library's members are
   private unless `public` and its `onInit` is its initializer; outside a
   library (this toolchain's global scope) everything is everyone's.
@@ -124,7 +137,13 @@ Shape isn't built into JASS yet").
   must have every method of its interface that has no `defaults`. What
   `a` in `a.b` is comes from the types: parameters, locals, globals,
   fields, what functions and methods return, casts. A struct's type is
-  `integer`. A function interface `I` is `integer` too: `I.f` is `f`'s
+  `integer`. A `hook Name Target` (`Target` a function, or a struct's
+  static method `S.m`): `h__Name`, taking and giving back what `Name`
+  does (a native's from the game's `common.j` and `Blizzard.j`:
+  `jass::Options::game`), calls each of its targets in turn, then
+  `Name`; every call of `Name` but in the targets themselves (a hook
+  calling what it hooks would run itself) is a call of it. A target
+  taking something else is an error. A function interface `I` is `integer` too: `I.f` is `f`'s
   number among the functions taken as `I`'s, and `x.evaluate(...)` /
   `x.execute(...)` (`wcb__fi_I`, `wcb__fx_I`) put the arguments into
   `I`'s globals and evaluate or execute the trigger of that number

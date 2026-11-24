@@ -40,6 +40,10 @@ pub struct Options {
     /// Shorter names ([`crate::uglify`]): everything the game doesn't need
     /// as it is renamed `a`, `b` ...
     pub uglify: bool,
+    /// The game's natives and functions (`common.j`, `Blizzard.j`): what
+    /// the code calls without declaring, for what a hook of one takes and
+    /// gives back.
+    pub game: Vec<Signature>,
 }
 
 /// What a build made: the script, and what it says about it.
@@ -57,7 +61,7 @@ pub fn build(m: &Module) -> Result<String, Vec<Error>> {
 
 /// [`build`], as `options` say.
 pub fn build_with(m: &Module, options: &Options) -> Result<Built, Vec<Error>> {
-    let m = crate::lower::lower(m)?;
+    let m = crate::lower::lower_with(m, &options.game)?;
     let errors = m.not_lowered();
     if !errors.is_empty() {
         return Err(errors);

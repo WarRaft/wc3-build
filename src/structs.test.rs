@@ -460,3 +460,101 @@ endlibrary
         assert!(out.contains(part), "{part}\nnot in:\n{out}");
     }
 }
+
+#[test]
+fn hooks_run_before_what_they_hook() {
+    let src = r#"// @dialect vjass
+library H
+    private function Log takes integer i returns nothing
+        call BJDebugMsg(I2S(i))
+    endfunction
+    struct Watch
+        static method seen takes integer i returns nothing
+            call BJDebugMsg(I2S(i + 1))
+        endmethod
+    endstruct
+    hook BJDebugMsgInt Log
+    hook BJDebugMsgInt Watch.seen
+    function Go takes nothing returns nothing
+        call BJDebugMsgInt(5)
+    endfunction
+endlibrary
+function BJDebugMsgInt takes integer i returns nothing
+    call BJDebugMsg(I2S(i))
+endfunction
+"#;
+    let out = build(&[("h.j", src)]).unwrap_or_else(|e| panic!("{e:?}"));
+    for part in [
+        "function h__BJDebugMsgInt takes integer i returns nothing\ncall H__Log(i)\ncall s__Watch_seen(i)\ncall BJDebugMsgInt(i)\nendfunction",
+        "function Go takes nothing returns nothing\ncall h__BJDebugMsgInt(5)",
+    ] {
+        assert!(out.contains(part), "{part}\nnot in:\n{out}");
+    }
+    // A hook taking something else: an error.
+    let bad = "// @dialect vjass\nfunction W takes real r returns nothing\nendfunction\nfunction V takes integer i returns nothing\nendfunction\nhook V W\nhook Nope W\n";
+    let e = build(&[("b.j", bad)]).unwrap_err();
+    assert_eq!(e, ["hook V W: W doesn't take what V takes", "hook Nope: no native or function Nope"]);
+    // A native of the game's (given as the game's): its wrapper takes and gives back what it does.
+    let m = crate::from_jass::module(&[crate::from_jass::Source { name: "n.j", text: "// @dialect vjass\nfunction Seen takes integer i returns nothing\nendfunction\nhook I2S Seen\nfunction F takes nothing returns string\n    return I2S(1)\nendfunction\n" }]).unwrap();
+    let game = crate::from_jass::signatures(COMMON);
+    let out = crate::jass::build_with(&m, &crate::jass::Options { game, ..Default::default() }).unwrap_or_else(|e| panic!("{e:?}")).script;
+    assert!(out.contains("function h__I2S takes integer i returns string\n    call Seen(i)\n    return I2S(i)\nendfunction"), "{out}");
+    assert!(out.contains("return h__I2S(1)"), "{out}");
+}
+
+#[test]
+fn a_library_made_of_textmacros_as_jasshelper_reads_it() {
+    let lib = r#"// @dialect vjass
+library Store
+//! novjass
+    Store API:
+        Ints[key] -> integer
+//! endnovjass
+    function LoadI takes integer p, integer k returns integer
+        return p + k
+    endfunction
+    function SaveI takes integer p, integer k, integer v returns nothing
+        call BJDebugMsg(I2S(p + k + v))
+    endfunction
+//! textmacro_once STORE takes NAME, TYPE, FUNC
+    struct $NAME$ extends array
+        method operator [] takes integer key returns $TYPE$
+            return Load$FUNC$(this, key)
+        endmethod
+        method operator []= takes integer key, $TYPE$ value returns nothing
+            call Save$FUNC$(this, key, value)
+        endmethod
+    endstruct
+//! endtextmacro
+//! runtextmacro STORE("Ints", "integer", "I")
+//! runtextmacro optional STORE_REALS()
+endlibrary
+"#;
+    let user = r#"// @dialect vjass
+//! textmacro_once STORE takes NAME, TYPE, FUNC
+    // A second declaration of a macro declared once: the first is kept.
+//! endtextmacro
+scope Use initializer Init
+    private function Removed takes integer i returns nothing
+        call BJDebugMsg("removing")
+    endfunction
+    hook SaveI Removed2
+    private function Removed2 takes integer p, integer k, integer v returns nothing
+    endfunction
+    private function Init takes nothing returns nothing
+        local Ints t = 5
+        set t[3] = t[2] + 1
+    endfunction
+endscope
+"#;
+    let out = build(&[("store.j", lib), ("use.j", user)]).unwrap_or_else(|e| panic!("{e:?}"));
+    for part in [
+        "function s__Ints__getindex takes integer this, integer key returns integer\nreturn LoadI(this, key)",
+        "function s__Ints__setindex takes integer this, integer key, integer value returns nothing\ncall h__SaveI(this, key, value)",
+        "function h__SaveI takes integer p, integer k, integer v returns nothing\ncall Use__Removed2(p, k, v)\ncall SaveI(p, k, v)",
+        "call s__Ints__setindex(t, 3, s__Ints__getindex(t, 2) + 1)",
+    ] {
+        assert!(out.contains(part), "{part}\nnot in:\n{out}");
+    }
+    assert!(!out.contains("Store API"), "{out}");
+}

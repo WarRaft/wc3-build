@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 
-use crate::from_jass::{Source, module_as};
+use crate::from_jass::{Source, module_with};
 use crate::ir::{Error, Module, Origin};
 use crate::map::{GameData, Map};
 use crate::objects::Objects;
@@ -56,6 +56,9 @@ pub struct Input<'a> {
     pub code: Vec<Code>,
     /// Shorter names ([`crate::uglify`]).
     pub uglify: bool,
+    /// Where JassHelper's `//! import "path"` in a file of the code leads
+    /// ([`crate::preprocess::Import`]).
+    pub import: &'a crate::preprocess::Import<'a>,
 }
 
 /// A piece of code: its name (a `.zn` one is Zinc, a `.vj` one vJASS),
@@ -120,17 +123,9 @@ pub fn script(input: &Input) -> Result<Script, Vec<Error>> {
     let units = read("war3mapUnits.doo").map(|b| doo_rs::parse_units_any(&b).map_err(|e| error("war3mapUnits.doo", format!("{e}")))).transpose()?;
 
     // The code first: what it uses names the placed things it needs.
-    let mut code = Module::default();
-    let mut errors = Vec::new();
-    for c in &input.code {
-        match module_as(&[Source { name: &c.name, text: &c.text }], c.dialect) {
-            Ok(m) => code.append(m),
-            Err(e) => errors.extend(e),
-        }
-    }
-    if !errors.is_empty() {
-        return Err(errors);
-    }
+    // All of it at once: JassHelper's textmacros run across files.
+    let sources: Vec<(Source, jass_rs::Dialect)> = input.code.iter().map(|c| (Source { name: &c.name, text: &c.text }, c.dialect)).collect();
+    let code = module_with(&sources, input.import)?;
     let used: HashSet<String> = crate::map::used_names(&code);
     let duration = |f: &str| read(f).and_then(|b| crate::audio::duration_ms(&b));
 
@@ -150,7 +145,9 @@ pub fn script(input: &Input) -> Result<Script, Vec<Error>> {
     let mut whole: Module = crate::map::start(&map, &game)?;
     whole.append(code);
     whole.append(crate::map::end(&map));
-    let built = crate::jass::build_with(&whole, &crate::jass::Options { uglify: input.uglify })?;
+    // The game's natives and functions, for hooks of them.
+    let game = ["Scripts\\common.j", "Scripts\\Blizzard.j"].iter().filter_map(|n| text(n)).flat_map(|t| crate::from_jass::signatures(&t)).collect();
+    let built = crate::jass::build_with(&whole, &crate::jass::Options { uglify: input.uglify, game })?;
     Ok(Script { text: built.script, notes: built.notes })
 }
 
