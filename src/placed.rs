@@ -97,7 +97,8 @@ fn fraction(percent: i32) -> Expr {
     Expr::real(percent as f32 / 100.0, 2)
 }
 
-fn name(kind: &str, r: Rawcode, number: i32) -> String {
+/// A placed thing's name in the script: `gg_unit_hfoo_0012`.
+pub(crate) fn name(kind: &str, r: Rawcode, number: i32) -> String {
     format!("gg_{kind}_{r}_{number:04}")
 }
 

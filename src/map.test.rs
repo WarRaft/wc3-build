@@ -86,3 +86,11 @@ fn sounds_as_world_editor_makes_them() {
         assert!(out.contains(part), "{part}\n---\n{out}");
     }
 }
+
+#[test]
+fn the_names_the_maps_files_declare() {
+    let regions = w3r_rs::Regions { version: 5, regions: vec![w3r_rs::Region::new("Spawn Zone", 0.0, 0.0, 1.0, 1.0, 0)] };
+    let cameras = w3c_rs::Cameras { version: 0, layout: w3c_rs::Layout::Classic, cameras: vec![w3c_rs::Camera::new("Intro", 0.0, 0.0)] };
+    let names = declared_names(Some(&regions), Some(&cameras), None, None, None);
+    assert_eq!(names, vec![("gg_rct_Spawn_Zone".to_string(), "rect"), ("gg_cam_Intro".to_string(), "camerasetup")]);
+}
