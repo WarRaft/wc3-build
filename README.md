@@ -369,6 +369,12 @@ Shape isn't built into JASS yet").
 rule of the group `pure`, have no duplicate, and check clean for names and
 types; calls only go up.
 
+`tests/real.rs`'s `built_scripts_check_clean` (ignored) reads scripts a
+build wrote (`BUILT_FILES`) as the game does, over `JASS_GAME`: no
+problem of names, types or `pure`'s. Diablo III beta's whole map built
+with `optimize=1` (6 calls inlined, 53 functions and 66 globals left out)
+and with `uglify=1` too: 0 problems (2026-11-25).
+
 `tests/manual.rs` (ignored) runs every example of JassHelper's manual
 (`JASSHELPER_MANUAL`: its `topics` folder; a Zinc topic's as Zinc)
 through the editor's parser and the build, and writes what each says to

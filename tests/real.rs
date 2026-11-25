@@ -82,3 +82,17 @@ fn real_folder() {
         println!("    {p}");
     }
 }
+
+/// Built scripts (`BUILT_FILES`, a path list: a map's `war3map.j` as a
+/// build wrote it, optimized or not) read as the game reads them: no
+/// problem of names, types or `pure`'s over `JASS_GAME`.
+#[test]
+#[ignore]
+fn built_scripts_check_clean() {
+    let env = game();
+    for p in std::env::split_paths(&std::env::var_os("BUILT_FILES").unwrap_or_default()) {
+        let found = problems(&read(&p), &env);
+        println!("{}: {} problem(s)", p.display(), found.len());
+        assert!(found.is_empty(), "{}:\n{}", p.display(), found.iter().take(20).cloned().collect::<Vec<_>>().join("\n"));
+    }
+}
