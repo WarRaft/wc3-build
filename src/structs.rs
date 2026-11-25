@@ -1386,6 +1386,30 @@ impl Cx<'_> {
         }
     }
 
+    /// `n` written bare in a method of its struct, a member of it (or of a
+    /// parent): `this.n`, a static one's `S.n`; `None` when `n` is a local,
+    /// a global, a function or a type, or no member.
+    fn bare_member(&self, n: &str) -> Option<Expr> {
+        let current = self.current?;
+        if n == "this" || self.locals.contains_key(n) || self.globals.contains_key(n) || self.sigs.contains_key(n) || self.types.infos.contains_key(n) || self.types.dynamic.contains_key(n) {
+            return None;
+        }
+        let (_, (_, is_static, _, _)) = self.types.field(current, n)?;
+        let object = if *is_static { Expr::var(current) } else { Expr::var("this") };
+        Some(Expr::Member(Box::new(object), n.to_string()))
+    }
+
+    /// A call of `name` written bare in a method of its struct, a method of
+    /// it: what it's called on (`this`, or the struct for a static one).
+    fn bare_method(&self, name: &str) -> Option<Expr> {
+        let current = self.current?;
+        if self.sigs.contains_key(name) || self.types.infos.contains_key(name) || name == "thistype" {
+            return None;
+        }
+        let (_, x) = self.types.method(current, name)?;
+        Some(if x.is_static { Expr::var(current) } else { Expr::var("this") })
+    }
+
     /// The dynamic array type `t` is, if it's one.
     fn dynamic(&self, t: Option<&str>) -> Option<(&str, &Dynamic)> {
         let t = t?;
@@ -1450,7 +1474,9 @@ impl Cx<'_> {
     fn pointer(&self, e: &Expr, want: &str, line: usize, errors: &mut Vec<Error>) -> Option<Expr> {
         let sig = self.types.functions.get(want)?;
         let (f, takes, returns): (String, Vec<String>, Option<String>) = match e {
-            Expr::Var(f) if self.type_of_var(f).is_none() && self.params.contains_key(f) => (f.clone(), self.params[f].clone(), self.sigs.get(f).cloned().flatten()),
+            // A function by its name, or as code (`function F`; Zinc's
+            // anonymous function).
+            Expr::Var(f) | Expr::Code(f) if (matches!(e, Expr::Code(_)) || self.type_of_var(f).is_none()) && self.params.contains_key(f) => (f.clone(), self.params[f].clone(), self.sigs.get(f).cloned().flatten()),
             Expr::Member(o, m) => {
                 let info = self.struct_named(o)?;
                 let (owner, x) = self.types.method(&info.name, m)?;
@@ -1703,6 +1729,12 @@ impl Cx<'_> {
     }
 
     fn stmt(&self, s: Stmt, errors: &mut Vec<Error>) -> Stmt {
+        // A member written bare in its struct's method (Zinc's): `this.x`.
+        if let Stmt::Set { name, index, value, line } = &s
+            && let Some(Expr::Member(object, _)) = self.bare_member(name)
+        {
+            return self.stmt(Stmt::SetMember { object: *object, name: name.clone(), index: index.clone(), value: value.clone(), line: *line }, errors);
+        }
         match s {
             Stmt::Local { ty, name, array, init, line } => {
                 let init = init.map(|e| self.value(e, Some(&ty), line, errors));
@@ -1736,12 +1768,12 @@ impl Cx<'_> {
             Stmt::Return { value, line } => Stmt::Return { value: value.map(|e| self.value(e, self.returns, line, errors)), line },
             Stmt::Debug { stmt, line } => Stmt::Debug { stmt: Box::new(self.stmt(*stmt, errors)), line },
             Stmt::SetMember { object, name, index, value, line } => {
-                let (value, vt) = self.expr(value, line, errors);
                 let index = index.map(|e| self.integer(e, line, errors));
                 match self.object(object, &name, line, errors) {
                     Some((t, instance)) => {
-                        let ty = self.types.field(&t, &name).map(|(_, f)| f.0.clone());
-                        let value = self.coerce(value, vt.as_deref(), ty.as_deref());
+                        // An array member's element, else the member: its type wanted.
+                        let ty = self.types.field(&t, &name).filter(|(_, f)| index.is_none() || f.3).map(|(_, f)| f.0.clone());
+                        let value = self.value(value, ty.as_deref(), line, errors);
                         self.set_member(t, instance, &name, index, value, line, errors)
                     }
                     None => Stmt::Set { name: "wcb__error".into(), index: None, value, line },
@@ -1825,6 +1857,13 @@ impl Cx<'_> {
     /// `e` as JASS has it, and its type when it can be told.
     fn expr(&self, e: Expr, line: usize, errors: &mut Vec<Error>) -> (Expr, Option<String>) {
         match e {
+            // A member written bare in its struct's method: `this.x`, `S.x`.
+            Expr::Var(n) if self.bare_member(&n).is_some() => self.expr(self.bare_member(&n).expect("checked"), line, errors),
+            Expr::Index(n, i) if self.bare_member(&n).is_some() => self.expr(Expr::Element(Box::new(self.bare_member(&n).expect("checked")), i), line, errors),
+            Expr::Call(Call { name, args }) if self.bare_method(&name).is_some() => {
+                let object = self.bare_method(&name).expect("checked");
+                self.expr(Expr::Method(Box::new(MethodCall { object, name, args })), line, errors)
+            }
             Expr::Var(n) => {
                 let t = self.type_of_var(&n);
                 (Expr::Var(n), t)
@@ -1851,7 +1890,7 @@ impl Cx<'_> {
             }
             // A function interface's pointer where an argument takes one.
             Expr::Call(Call { name, args })
-                if self.params.get(&name).is_some_and(|w| args.iter().zip(w).any(|(a, t)| self.types.functions.contains_key(t) && matches!(a, Expr::Var(_) | Expr::Member(..)))) =>
+                if self.params.get(&name).is_some_and(|w| args.iter().zip(w).any(|(a, t)| self.types.functions.contains_key(t) && matches!(a, Expr::Var(_) | Expr::Member(..) | Expr::Code(_)))) =>
             {
                 let want = self.params[&name].clone();
                 let args = args.into_iter().enumerate().map(|(i, a)| self.value(a, want.get(i).map(String::as_str), line, errors)).collect();

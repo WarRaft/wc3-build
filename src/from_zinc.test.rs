@@ -170,3 +170,73 @@ fn what_isnt_read_is_an_error() {
     // `big` (10000 cells) is several of the game's arrays: no error.
     assert_eq!(messages, [(1, "grid: every size of an array of several dimensions but the first must be given"), (3, "ok has 2 dimensions: as many indices")]);
 }
+
+#[test]
+fn the_manuals_zinc_types() {
+    let m = read(
+        "t.zn",
+        r#"
+library Test
+{
+    type unitFunc extends function(integer);
+    type evFunction extends function(integer, integer) -> boolean;
+    type IntFunc extends function(integer);
+    type myDinArray extends integer[5];
+    type myDinArray2 extends real[6, 10000];
+    function Pick(integer u, unitFunc F) { F.evaluate(u); }
+    function Less(integer a, integer b) -> boolean { return a < b; }
+    struct[20000] C
+    {
+        real a;
+    }
+    interface[30000] D
+    {
+        integer meh;
+        method transform(integer a) -> integer;
+    }
+    struct E extends D
+    {
+        method transform(integer a) -> integer { return a + meh; }
+    }
+    struct abuse
+    {
+        IntFunc fn;
+        string msg;
+        method cantThinkOfAName()
+        {
+            fn = method()
+            {
+                BJDebugMsg(msg);
+            };
+            fn.evaluate(this);
+        }
+    }
+    function Use()
+    {
+        evFunction e = Less;
+        myDinArray2 r = myDinArray2.create();
+        Pick(3, function(integer x) { BJDebugMsg(I2S(x)); });
+        r[5] = 1.0;
+        e.evaluate(1, 2);
+    }
+}
+"#,
+    );
+    let out = jass(&m);
+    for part in [
+        // A function type: a function interface; an anonymous function as its value.
+        "call Test__Pick(3, 1)",
+        "local integer e = 1",
+        // An anonymous method: a method taking this, as a pointer; bare members.
+        "set s__Test__abuse_fn[this] = 1",
+        "call BJDebugMsg(s__Test__abuse_msg[this])",
+        // struct[20000], interface[30000]: their index space.
+        "if this >= 20000 then",
+        "if this >= 30000 then",
+        // real[6, 10000]: 1666 instances.
+        "if this > 1666 then",
+        "call wcb__as_s__Test__myDinArray2((r - 1) * 6 + 5, 1.0)",
+    ] {
+        assert!(out.contains(part), "{part}\nnot in:\n{out}");
+    }
+}

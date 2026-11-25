@@ -30,7 +30,7 @@ const ANON: &str = "wcb__anon_";
 pub fn add(m: &mut Module, f: &Source, p: &z::Program, errors: &mut Vec<Error>) {
     let lines: Vec<&str> = f.text.lines().collect();
     let next_anon = m.functions.iter().filter(|g| g.sig.name.starts_with(ANON)).count();
-    let mut r = Reader { file: f.name, lines: &lines, m, errors, next_anon, scope: None, grids: Default::default() };
+    let mut r = Reader { file: f.name, lines: &lines, m, errors, next_anon, scope: None, grids: Default::default(), anon_methods: Vec::new() };
     // The arrays of several dimensions first: a function may use one
     // declared below it.
     let members = p.globals.iter().chain(p.libraries.iter().flat_map(|l| &l.members));
@@ -86,6 +86,9 @@ struct Reader<'a> {
     /// Arrays of more than one dimension: each one's sizes past the first
     /// (`integer a[10][20]`: `[20]`), for `a[i][j]` as `a[i * 20 + j]`.
     grids: std::collections::HashMap<String, Vec<z::Expr>>,
+    /// The anonymous methods read in the struct or module being read: its
+    /// methods too.
+    anon_methods: Vec<Method>,
 }
 
 impl Reader<'_> {
@@ -125,7 +128,8 @@ impl Reader<'_> {
                 let st = Struct {
                     name: s.name.clone(),
                     owner: self.owner(&s.modifiers),
-                    extends: s.extends.clone(),
+                    // `struct Data[]`: an array struct.
+                    extends: if s.array { Some("array".into()) } else { s.extends.clone() },
                     size: s.size.as_ref().map(|e| self.expr(e)),
                     fields,
                     methods,
@@ -136,7 +140,7 @@ impl Reader<'_> {
             }
             z::Member::Interface(t) => {
                 let (fields, methods, _) = self.members(&t.members);
-                let i = Interface { name: t.name.clone(), owner: self.owner(&t.modifiers), fields, size: None, methods, origin: self.origin(t.line) };
+                let i = Interface { name: t.name.clone(), owner: self.owner(&t.modifiers), fields, size: t.size.as_ref().map(|e| self.expr(e)), methods, origin: self.origin(t.line) };
                 self.m.interfaces.push(i);
             }
             z::Member::Module(t) => {
@@ -144,12 +148,18 @@ impl Reader<'_> {
                 let x = Mixin { name: t.name.clone(), owner: self.owner(&t.modifiers), fields, methods, mixins, origin: self.origin(t.line) };
                 self.m.mixins.push(x);
             }
-            z::Member::TypeDef { modifiers, name, extends, size, line } => {
+            // A function type: a function interface.
+            z::Member::TypeDef { modifiers, name, function: Some((params, returns)), line, .. } => {
+                let params = params.iter().enumerate().map(|(k, t)| Param { ty: t.clone(), name: format!("p{k}") }).collect();
+                let sig = Signature { name: name.clone(), params, returns: returns.clone(), constant: false };
+                self.m.function_types.push(FunctionType { sig, owner: self.owner(modifiers), origin: self.origin(*line) });
+            }
+            z::Member::TypeDef { modifiers, name, extends, size, space, line, .. } => {
                 let t = TypeDef {
                     name: name.clone(),
                     extends: extends.clone(),
                     size: size.as_ref().map(|e| self.expr(e)),
-                    space: None,
+                    space: space.as_ref().map(|e| self.expr(e)),
                     owner: self.owner(modifiers),
                     origin: self.origin(*line),
                 };
@@ -161,6 +171,7 @@ impl Reader<'_> {
     /// A struct's, interface's or module's members.
     fn members(&mut self, members: &[z::StructMember]) -> (Vec<Field>, Vec<Method>, Vec<(String, bool)>) {
         let (mut fields, mut methods, mut mixins) = (Vec::new(), Vec::new(), Vec::new());
+        let outer = std::mem::take(&mut self.anon_methods);
         for member in members {
             match member {
                 z::StructMember::Field(v) => {
@@ -193,6 +204,9 @@ impl Reader<'_> {
                 z::StructMember::Implement { name, optional, .. } => mixins.push((name.clone(), *optional)),
             }
         }
+        // Its anonymous methods: methods of it.
+        methods.append(&mut self.anon_methods);
+        self.anon_methods = outer;
         (fields, methods, mixins)
     }
 
@@ -449,6 +463,22 @@ impl Reader<'_> {
                 }
             }
             K::FuncRef(n) => Expr::code(n.clone()),
+            // An anonymous method: a method of the struct it's in
+            // (`wcb__anon_<n>`), named as a function pointer is.
+            K::AnonMethod(f) => {
+                let name = format!("{ANON}{}", self.next_anon);
+                self.next_anon += 1;
+                let mut f = (**f).clone();
+                f.sig.name = name.clone();
+                let function = Function {
+                    sig: signature(&f.sig),
+                    body: f.body.as_ref().map(|b| self.stmts(b)).unwrap_or_default(),
+                    owner: Owner { scope: self.scope.clone(), access: Access::Everyone },
+                    origin: self.origin(f.sig.line),
+                };
+                self.anon_methods.push(Method { function, is_static: false, stub: false, private: true, abstract_: false, defaults: None });
+                Expr::Member(Box::new(Expr::var("thistype")), name)
+            }
             K::AnonFunction(f) => {
                 let name = format!("{ANON}{}", self.next_anon);
                 self.next_anon += 1;
