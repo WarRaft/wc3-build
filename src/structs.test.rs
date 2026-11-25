@@ -890,3 +890,98 @@ endfunction
     assert!(out.contains("call wcb__as_mat2(99 * H + 199, wcb__ag_mat2(1 * H + 2))"), "{out}");
     assert!(out.contains("integer array mat2__2") && !out.contains("mat2__3"), "{out}");
 }
+
+#[test]
+fn dynamic_arrays() {
+    let out = build(&[(
+        "t.j",
+        r#"// @dialect vjass
+type arsample extends integer array[8]
+type iar extends integer array[3]
+type iar_ar extends iar array[3]
+type stackarray extends integer array [20]
+type myDyArray extends integer array [200,40000]
+function test takes nothing returns arsample
+    local arsample r = arsample.create()
+    local integer i = 0
+    loop
+        exitwhen i == arsample.size
+        set r[i] = i
+        set i = i + 1
+    endloop
+    return r
+endfunction
+function matrix takes nothing returns nothing
+    local iar_ar r = iar_ar.create()
+    local integer i = 0
+    loop
+        exitwhen i == iar_ar.size
+        set r[i] = iar.create()
+        set r[i][2] = i * r[i][1]
+        set i = i + 1
+    endloop
+    call r.destroy()
+endfunction
+struct stack
+    private stackarray V
+    private integer N = 0
+    static method create takes nothing returns stack
+        local stack s = stack.allocate()
+        set s.V = stackarray.create()
+        return s
+    endmethod
+    method push takes integer i returns nothing
+        if (.N == .V.size) then
+            return
+        endif
+        set .V[.N] = i
+        set .N = .N + 1
+    endmethod
+    method top takes nothing returns integer
+        return .V[.N - 1]
+    endmethod
+endstruct
+function big takes nothing returns integer
+    local myDyArray d = myDyArray.create()
+    set d[199] = 5
+    call myDyArray.destroy(d)
+    return d[199]
+endfunction
+"#,
+    )])
+    .unwrap();
+    // Each type: its storage and free list; 8190 places unless given.
+    assert!(out.contains("integer array s__arsample\n") && out.contains("integer array s__iar_ar\n"), "{out}");
+    assert!(out.contains("function s__arsample_create takes nothing returns integer"), "{out}");
+    assert!(out.contains("if this > 1023 then\nreturn 0\nendif"), "{out}");
+    assert!(out.contains("exitwhen i == 8\nset s__arsample[(r - 1) * 8 + i] = i"), "{out}");
+    // An element of an element: of iar's storage.
+    assert!(out.contains("set s__iar_ar[(r - 1) * 3 + i] = s__iar_create()"), "{out}");
+    assert!(out.contains("set s__iar[(s__iar_ar[(r - 1) * 3 + i] - 1) * 3 + 2] = i * s__iar[(s__iar_ar[(r - 1) * 3 + i] - 1) * 3 + 1]"), "{out}");
+    assert!(out.contains("call s__iar_ar_destroy(r)"), "{out}");
+    // A struct's member of a dynamic array type.
+    assert!(out.contains("if s__stack_N[this] == 20 then"), "{out}");
+    assert!(out.contains("set s__stackarray[(s__stack_V[this] - 1) * 20 + s__stack_N[this]] = i"), "{out}");
+    // [200, 40000]: 200 instances in 40000 places, split.
+    assert!(out.contains("if this > 200 then"), "{out}");
+    assert!(out.contains("call wcb__as_s__myDyArray((d - 1) * 200 + 199, 5)") && out.contains("call s__myDyArray_destroy(d)"), "{out}");
+}
+
+#[test]
+fn casts_of_dynamic_arrays() {
+    let out = build(&[(
+        "t.j",
+        r#"// @dialect vjass
+type anarrayofdata extends integer array [6]
+function getdata5 takes integer u returns integer
+    return anarrayofdata(u)[5]
+endfunction
+function setdata5 takes anarrayofdata x returns integer
+    return integer(x)
+endfunction
+"#,
+    )])
+    .unwrap();
+    assert!(out.contains("return s__anarrayofdata[(u - 1) * 6 + 5]"), "{out}");
+    assert!(out.contains("return x\n"), "{out}");
+}

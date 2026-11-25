@@ -137,6 +137,25 @@ struct Types {
     /// Each root's index space (its `[size]`; 8191 without), for every
     /// struct of its family and its arrays.
     space: HashMap<String, i64>,
+    /// The dynamic array types (`type T extends E array [size]`).
+    dynamic: HashMap<String, Dynamic>,
+}
+
+/// A dynamic array type: its elements' type, its size, how many instances
+/// it has room for. Its elements are the array `s__T`, instance `x`'s
+/// element `i` at `(x - 1) * size + i`; its instances come from a free
+/// list as a struct's (`s__T_create`, 0 when there's no room; `s__T_destroy`).
+#[derive(Clone)]
+struct Dynamic {
+    elem: String,
+    size: i64,
+}
+
+impl Dynamic {
+    /// Where instance `x`'s element `i` is in `s__T`.
+    fn at(&self, x: Expr, i: Expr) -> Expr {
+        Expr::binary(Expr::binary(Expr::binary(x, BinOp::Sub, Expr::int(1)), BinOp::Mul, Expr::int(self.size)), BinOp::Add, i)
+    }
 }
 
 impl Types {
@@ -331,7 +350,8 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
             None => errors.push(Error { origin: origin.clone(), message: format!("{name}'s index space isn't a number known before the game runs (a literal or a constant)") }),
         }
     }
-    let mut types = Types { infos, functions, families: HashMap::new(), space };
+    let dynamic = dynamic_arrays(m, errors);
+    let mut types = Types { infos, functions, families: HashMap::new(), space, dynamic };
     // Families of several: an interface's, a struct's with children.
     let mut members: HashMap<String, Vec<String>> = HashMap::new();
     for s in &structs {
@@ -577,20 +597,31 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
             });
         }
         function_pointers(m, &types, &pointers, &mut setup);
-        // Function interface types and array structs are integers; a
-        // struct's stays an object.
+        // Function interface types, array structs and dynamic arrays are
+        // integers (the classes' members and methods' too); a struct's
+        // stays an object.
+        let is_integer = |t: &str| types.functions.contains_key(t) || types.dynamic.contains_key(t) || types.infos.get(t).is_some_and(|i| i.array);
         let integer = |t: &mut String| {
-            if types.functions.contains_key(t.as_str()) || types.infos.get(t.as_str()).is_some_and(|i| i.array) {
+            if is_integer(t) {
                 *t = "integer".into();
             }
         };
         m.globals.iter_mut().for_each(|g| integer(&mut g.ty));
-        for f in &mut m.functions {
+        let mut functions: Vec<&mut Function> = m.functions.iter_mut().collect();
+        for st in &mut m.structs {
+            st.fields.iter_mut().for_each(|f| integer(&mut f.ty));
+            functions.extend(st.methods.iter_mut().map(|me| &mut me.function));
+        }
+        for i in &mut m.interfaces {
+            i.fields.iter_mut().for_each(|f| integer(&mut f.ty));
+            functions.extend(i.methods.iter_mut().map(|me| &mut me.function));
+        }
+        for f in functions {
             f.sig.params.iter_mut().for_each(|p| integer(&mut p.ty));
             if let Some(r) = &mut f.sig.returns {
                 integer(r);
             }
-            local_types_integer(&mut f.body, &|t| types.functions.contains_key(t) || types.infos.get(t).is_some_and(|i| i.array));
+            local_types_integer(&mut f.body, &is_integer);
         }
         return Lowered { inits, setup };
     }
@@ -626,7 +657,7 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
 
     // Struct, interface and function interface types are integers.
     let integer = |t: &mut String| {
-        if types.infos.contains_key(t.as_str()) || types.functions.contains_key(t.as_str()) {
+        if types.infos.contains_key(t.as_str()) || types.functions.contains_key(t.as_str()) || types.dynamic.contains_key(t.as_str()) {
             *t = "integer".into();
         }
     };
@@ -638,7 +669,7 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
         if let Some(r) = &mut f.sig.returns {
             integer(r);
         }
-        local_types_integer(&mut f.body, &|t| types.infos.contains_key(t) || types.functions.contains_key(t));
+        local_types_integer(&mut f.body, &|t| types.infos.contains_key(t) || types.functions.contains_key(t) || types.dynamic.contains_key(t));
     }
     Lowered { inits, setup }
 }
@@ -726,6 +757,71 @@ fn parent_create<'a>(types: &'a Types, structs: &[Struct], s: &str) -> Option<(&
         let own = structs.iter().any(|x| x.name == i.name && x.methods.iter().any(|me| me.is_static && me.function.sig.name == "create"));
         own.then(|| i.methods.get("create").map(|x| (i, x))).flatten()
     })
+}
+
+/// The dynamic array types of `m` (taken out of its types): each one's
+/// storage `s__T` and free list, `s__T_create` and `s__T_destroy`.
+fn dynamic_arrays(m: &mut Module, errors: &mut Vec<Error>) -> HashMap<String, Dynamic> {
+    let mut out = HashMap::new();
+    let types = std::mem::take(&mut m.types);
+    for t in types {
+        let Some(size) = &t.size else {
+            m.types.push(t);
+            continue;
+        };
+        let Some(size) = m.const_int(size).filter(|n| *n >= 1) else {
+            errors.push(Error { origin: t.origin.clone(), message: format!("{}'s size isn't a number known before the game runs (a literal or a constant), from 1", t.name) });
+            continue;
+        };
+        // All its instances' elements share one storage (8190 places, as
+        // JassHelper's, unless given).
+        let space = match &t.space {
+            Some(e) => match m.const_int(e).filter(|n| (1..=MAX_SPACE).contains(n)) {
+                Some(n) => n,
+                None => {
+                    errors.push(Error { origin: t.origin.clone(), message: format!("{}'s storage space isn't a number from 1 to {MAX_SPACE} known before the game runs", t.name) });
+                    continue;
+                }
+            },
+            None => DEFAULT_SIZE - 1,
+        };
+        let max = space / size;
+        if max < 1 {
+            errors.push(Error { origin: t.origin.clone(), message: format!("{}: its size {size} leaves no room for an instance in {space} places", t.name) });
+            continue;
+        }
+        let n = &t.name;
+        let o = t.origin.clone();
+        let mut storage = Global::new(format!("s__{n}"), t.extends.clone(), None, o.clone());
+        storage.array = true;
+        storage.size = Some(Expr::int(max * size));
+        m.globals.push(storage);
+        free_list(m, n, n, Some(o.clone()));
+        if let Some(v) = m.globals.iter_mut().find(|g| g.name == format!("si__{n}_V")) {
+            v.size = Some(Expr::int(max + 1));
+        }
+        let (free, last, next) = (format!("si__{n}_F"), format!("si__{n}_I"), format!("si__{n}_V"));
+        let ne = |a: Expr, b: Expr| Expr::binary(a, BinOp::NotEq, b);
+        let create = vec![
+            Stmt::local("integer", "this", Some(Expr::var(free.clone()))),
+            Stmt::If {
+                branches: vec![(ne(this(), Expr::int(0)), vec![Stmt::set(free.clone(), Expr::Index(next.clone(), Box::new(this())))])],
+                otherwise: Some(vec![Stmt::set(last.clone(), Expr::binary(Expr::var(last.clone()), BinOp::Add, Expr::int(1))), Stmt::set("this", Expr::var(last.clone()))]),
+                line: 0,
+            },
+            Stmt::If { branches: vec![(Expr::binary(this(), BinOp::Gt, Expr::int(max)), vec![Stmt::Return { value: Some(Expr::int(0)), line: 0 }])], otherwise: None, line: 0 },
+            Stmt::set_at(next.clone(), this(), Expr::int(-1)),
+            Stmt::Return { value: Some(this()), line: 0 },
+        ];
+        let mut c = Function::new(format!("s__{n}_create"), create, o.clone());
+        c.sig.returns = Some("integer".into());
+        m.functions.push(c);
+        let mut d = Function::new(format!("s__{n}_destroy"), taken(n, give_back(n)), o);
+        d.sig.params.push(Param { ty: "integer".into(), name: "this".into() });
+        m.functions.push(d);
+        out.insert(n.clone(), Dynamic { elem: t.extends.clone(), size });
+    }
+    out
 }
 
 /// `I.create(t)` of the interface `i`: `s__I__create_by_type(t)`, an
@@ -1290,6 +1386,29 @@ impl Cx<'_> {
         }
     }
 
+    /// The dynamic array type `t` is, if it's one.
+    fn dynamic(&self, t: Option<&str>) -> Option<(&str, &Dynamic)> {
+        let t = t?;
+        self.types.dynamic.get_key_value(t).map(|(k, d)| (k.as_str(), d))
+    }
+
+    /// The dynamic array type a variable `n` (no array) holds, if any.
+    fn dynamic_var(&self, n: &str) -> Option<(String, Dynamic)> {
+        if self.is_array(n) {
+            return None;
+        }
+        let t = self.type_of_var(n)?;
+        self.dynamic(Some(&t)).map(|(k, d)| (k.to_string(), d.clone()))
+    }
+
+    /// Is `e` a dynamic array type by its name (`T.create()`, `T.size`)?
+    fn dynamic_named(&self, e: &Expr) -> Option<(String, Dynamic)> {
+        match e {
+            Expr::Var(n) if self.type_of_var(n).is_none() => self.types.dynamic.get(n).map(|d| (n.clone(), d.clone())),
+            _ => None,
+        }
+    }
+
     /// The width and height of the 2D global array `n` (not hidden by a
     /// local).
     fn grid(&self, n: &str) -> Option<(Expr, Expr)> {
@@ -1299,6 +1418,13 @@ impl Cx<'_> {
     /// The size of the sized array `e` names: a global (`a`), a member
     /// (`x.a`, `S.a`); `None` when it names none.
     fn size_of(&self, e: &Expr) -> Option<Expr> {
+        // A dynamic array's: its type's size (`T.size`, `r.size`, `a.r.size`).
+        if let Some((_, d)) = self.dynamic_named(e) {
+            return Some(Expr::int(d.size));
+        }
+        if let Some(d) = self.dynamic(self.type_of_expr(e).as_deref()) {
+            return Some(Expr::int(d.1.size));
+        }
         match e {
             Expr::Var(n) if !self.locals.contains_key(n) => self.sizes.get(n).cloned(),
             Expr::Member(o, f) => {
@@ -1524,6 +1650,10 @@ impl Cx<'_> {
 
     /// `v[i]` of what isn't an array: its type's `operator []`.
     fn element(&self, v: Expr, t: Option<String>, i: Expr, line: usize, errors: &mut Vec<Error>) -> (Expr, Option<String>) {
+        // A dynamic array's: in its storage.
+        if let Some((n, d)) = self.dynamic(t.as_deref()) {
+            return (Expr::Index(format!("s__{n}"), Box::new(d.at(v, i))), Some(d.elem.clone()));
+        }
         match t.filter(|t| self.has_operator(t, "[]")) {
             Some(t) => self.operator(&t, Some(v), "[]", vec![i], line, errors),
             None => {
@@ -1535,6 +1665,9 @@ impl Cx<'_> {
 
     /// `set v[i] = value` of what isn't an array: its type's `operator []=`.
     fn set_element(&self, v: Expr, t: Option<String>, i: Expr, value: Expr, line: usize, errors: &mut Vec<Error>) -> Stmt {
+        if let Some((n, d)) = self.dynamic(t.as_deref()) {
+            return Stmt::Set { name: format!("s__{n}"), index: Some(d.at(v, i)), value, line };
+        }
         match t.filter(|t| self.has_operator(t, "[]=")) {
             Some(t) => self.call_stmt(self.operator(&t, Some(v), "[]=", vec![i, value], line, errors).0, line),
             None => {
@@ -1580,6 +1713,13 @@ impl Cx<'_> {
                 let i = self.expr(i, line, errors).0;
                 let value = self.expr(value, line, errors).0;
                 self.call_stmt(self.operator(&t, o, "[]=", vec![i, value], line, errors).0, line)
+            }
+            // `set r[i] = v` of a dynamic array: its element in the storage.
+            Stmt::Set { name, index: Some(i), value, line } if self.dynamic_var(&name).is_some() => {
+                let (t, d) = self.dynamic_var(&name).expect("checked");
+                let i = self.integer(i, line, errors);
+                let value = self.value(value, Some(&d.elem), line, errors);
+                Stmt::Set { name: format!("s__{t}"), index: Some(d.at(Expr::Var(name), i)), value, line }
             }
             Stmt::Set { name, index, value, line } => {
                 let index = index.map(|e| self.integer(e, line, errors));
@@ -1695,6 +1835,10 @@ impl Cx<'_> {
                 if let Some((t, o)) = self.indexed(&n).filter(|(t, _)| self.has_operator(t, "[]")) {
                     return self.operator(&t, o, "[]", vec![i], line, errors);
                 }
+                // `r[i]` of a dynamic array: its element in the storage.
+                if let Some((t, d)) = self.dynamic_var(&n) {
+                    return (Expr::Index(format!("s__{t}"), Box::new(d.at(Expr::Var(n), i))), Some(d.elem));
+                }
                 // `S[i]` of an array struct (`extends array`): its instance `i`.
                 if !self.is_array(&n)
                     && self.type_of_var(&n).is_none()
@@ -1716,8 +1860,13 @@ impl Cx<'_> {
             }
             Expr::Call(Call { name, args }) => {
                 let (mut args, have) = self.args(args, line, errors);
-                // A cast: `Data(x)`, `thistype(x)`.
-                let cast = if name == "thistype" { self.current.map(String::from) } else { self.types.infos.contains_key(&name).then(|| name.clone()) };
+                // A cast: `Data(x)`, `thistype(x)`, of a dynamic array type
+                // (`T(x)`), and back (`integer(x)`).
+                let cast = if name == "thistype" {
+                    self.current.map(String::from)
+                } else {
+                    (self.types.infos.contains_key(&name) || self.types.dynamic.contains_key(&name) || name == "integer").then(|| name.clone())
+                };
                 if let Some(t) = cast
                     && args.len() == 1
                 {
@@ -1969,6 +2118,17 @@ impl Cx<'_> {
             let o = self.coerce(args.remove(0), have[0].as_deref(), Some(&t));
             return self.instance_method(o, t, name, Vec::new(), line, errors);
         }
+        // A dynamic array type's `T.create()`, `T.destroy(x)`.
+        if let Some((t, _)) = self.dynamic_named(&object) {
+            return match (name.as_str(), args.len()) {
+                ("create", 0) => (call(format!("s__{t}_create"), args), Some(t)),
+                ("destroy", 1) => (call(format!("s__{t}_destroy"), args), None),
+                _ => {
+                    self.error(errors, line, format!("{t}.{name}: a dynamic array type has create() and destroy(x) only"));
+                    (Expr::lit("0"), None)
+                }
+            };
+        }
         // `I.create(typeid)` of an interface: an instance of its struct of
         // that type (`s__I__create_by_type`), 0 for none.
         if let Some(info) = self.struct_named(&object)
@@ -2043,6 +2203,14 @@ impl Cx<'_> {
                     (Expr::lit("0"), None)
                 }
             };
+        }
+        // An instance of a dynamic array: `x.destroy()`.
+        if let Some((n, _)) = self.dynamic(t.as_deref()) {
+            if name == "destroy" && args.is_empty() {
+                return (call(format!("s__{n}_destroy"), vec![o]), None);
+            }
+            self.error(errors, line, format!(".{name}() of a dynamic array: it has destroy() only"));
+            return (Expr::lit("0"), None);
         }
         let Some(t) = t.filter(|t| self.types.infos.contains_key(t)) else {
             self.error(errors, line, format!(".{name}() of what isn't a struct (or whose type can't be told)"));

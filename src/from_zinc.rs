@@ -149,6 +149,7 @@ impl Reader<'_> {
                     name: name.clone(),
                     extends: extends.clone(),
                     size: size.as_ref().map(|e| self.expr(e)),
+                    space: None,
                     owner: self.owner(modifiers),
                     origin: self.origin(*line),
                 };

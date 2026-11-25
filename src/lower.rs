@@ -169,6 +169,7 @@ pub fn lower_for(m: &Module, game: &[Signature], classes: bool) -> Result<Module
     for t in &mut m.types {
         let scope = t.owner.scope.clone();
         t.name = resolve(scope.as_deref(), &t.name);
+        t.extends = resolve(scope.as_deref(), &t.extends);
         t.owner = Owner::default();
     }
     for f in &mut m.functions {

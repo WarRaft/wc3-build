@@ -182,6 +182,8 @@ pub struct TypeDef {
     /// A dynamic array type (`type T extends integer array [16]`): its
     /// size, as written.
     pub size: Option<Expr>,
+    /// Its storage space (`[200, 40000]`), as written.
+    pub space: Option<Expr>,
     pub owner: Owner,
     pub origin: Origin,
 }

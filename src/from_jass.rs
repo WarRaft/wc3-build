@@ -177,10 +177,11 @@ impl Reader<'_> {
     fn items(&self, m: &mut Module, f: &Source, items: &[j::TopLevel], scope: Option<&str>, errors: &mut Vec<Error>) {
         for item in items {
             match item {
-                j::TopLevel::TypeDef { name, extends, line, size, modifiers } => m.types.push(TypeDef {
+                j::TopLevel::TypeDef { name, extends, line, size, space, modifiers } => m.types.push(TypeDef {
                     name: name.clone(),
                     extends: extends.clone(),
                     size: size.as_ref().map(|e| self.expr(e)),
+                    space: space.as_ref().map(|e| self.expr(e)),
                     owner: owner(scope, modifiers),
                     origin: self.origin(*line),
                 }),
