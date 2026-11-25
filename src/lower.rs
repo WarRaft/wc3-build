@@ -294,10 +294,20 @@ pub fn lower_for(m: &Module, game: &[Signature], classes: bool) -> Result<Module
     for f in m.functions.iter_mut().filter(|f| f.sig.name == "main") {
         f.body.retain(|s| !matches!(s, Stmt::Call { call, .. } if call.name.starts_with("InitTrig_") && call.args.is_empty() && !defined.contains(&call.name)));
     }
-    if !init.is_empty() {
+    let injected = inject(&mut m, &mut errors);
+    // `//! dovjassinit`: vJASS's initialization there (nothing to put, the
+    // call gone).
+    let mut placed = false;
+    for f in m.functions.iter_mut().filter(|f| f.sig.name == "main") {
+        if let Some(at) = f.body.iter().position(|s| matches!(s, Stmt::Call { call, .. } if call.name == crate::preprocess::DOVJASSINIT)) {
+            f.body.splice(at..at + 1, std::mem::take(&mut init));
+            placed = true;
+        }
+    }
+    if !init.is_empty() && !placed {
         // Right after `InitBlizzard()`, as JassHelper (before the triggers'
         // variables are set: `InitGlobals`); else a `main` of their own
-        // after the first.
+        // after the first; an injected `main` without either has no place.
         let blizzard = m.functions.iter_mut().filter(|f| f.sig.name == "main").find_map(|f| {
             let at = f.body.iter().position(|s| matches!(s, Stmt::Call { call, .. } if call.name == "InitBlizzard"))?;
             Some((f, at))
@@ -305,6 +315,10 @@ pub fn lower_for(m: &Module, game: &[Signature], classes: bool) -> Result<Module
         match blizzard {
             Some((f, at)) => {
                 f.body.splice(at + 1..at + 1, init);
+            }
+            None if injected.is_some() => {
+                let origin = injected.clone().expect("checked");
+                errors.push(Error { origin, message: "the injected main calls no InitBlizzard() and has no //! dovjassinit: vJASS's initialization (structs' onInit, libraries' initializers) has no place to run".into() });
             }
             None => {
                 let main = Function::new("main", init, Origin::file(ORIGIN));
@@ -467,6 +481,45 @@ impl Scopes {
         scope.to_string()
     }
 }
+
+/// JassHelper's `//! inject main` (`config`, `preprocess` made it a
+/// function `wcb__inject_main`): it's the map's `main` instead of World
+/// Editor's (the map's files' own, `crate::map`), and every other `main` (the
+/// triggers', the code's) merges into `InitCustomTriggers`, as World Editor
+/// names what initializes the triggers, which it may call. An injected
+/// `config` is the map's `config`; another of the code's is an error.
+/// Where the injected `main` is written, when there's one.
+fn inject(m: &mut Module, errors: &mut Vec<Error>) -> Option<Origin> {
+    let name = |what: &str| format!("{}{what}", crate::preprocess::INJECT);
+    let entry = |f: &Function, what: &str| f.sig.name == what && f.sig.params.is_empty() && f.sig.returns.is_none();
+    let mut injected = None;
+    for what in ["main", "config"] {
+        let all: Vec<usize> = (0..m.functions.len()).filter(|&i| m.functions[i].sig.name == name(what)).collect();
+        let Some(&first) = all.first() else { continue };
+        for &again in &all[1..] {
+            errors.push(Error { origin: m.functions[again].origin.clone(), message: format!("`//! inject {what}` again (the first at {}:{})", m.functions[first].origin.file, m.functions[first].origin.line) });
+        }
+        // World Editor's, of the map's files: replaced.
+        m.functions.retain(|f| !(entry(f, what) && f.origin.file == ORIGIN_MAP));
+        if what == "main" {
+            for f in m.functions.iter_mut().filter(|f| entry(f, "main")) {
+                f.sig.name = "InitCustomTriggers".into();
+            }
+            injected = m.functions.iter().find(|f| f.sig.name == name(what)).map(|f| f.origin.clone());
+        } else {
+            for f in m.functions.iter().filter(|f| entry(f, "config")) {
+                errors.push(Error { origin: f.origin.clone(), message: "a config of the code's beside an `//! inject config`: the injected one is the map's config".into() });
+            }
+        }
+        for f in m.functions.iter_mut().filter(|f| f.sig.name == name(what)) {
+            f.sig.name = what.into();
+        }
+    }
+    injected
+}
+
+/// What the map's own part of the script (`crate::map`) is from.
+const ORIGIN_MAP: &str = "the map";
 
 /// The libraries' indices, each after those it requires (in the order
 /// written otherwise); errors for one required that isn't there, a

@@ -122,7 +122,7 @@ pub fn expr(text: &str) -> Result<Expr, String> {
 
 /// JassHelper's preprocessor directives, which aren't read.
 /// JassHelper's directives not run yet (the rest are [`crate::preprocess`]'s).
-const DIRECTIVES: [&str; 5] = ["inject", "endinject", "dovjassinit", "loaddata", "external"];
+const DIRECTIVES: [&str; 2] = ["loaddata", "external"];
 
 /// Each of JassHelper's preprocessor directives in a file: an error.
 fn directives(f: &Source) -> Vec<Error> {

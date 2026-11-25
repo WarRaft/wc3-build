@@ -62,9 +62,12 @@ fn jasshelpers_preprocessor_run_first() {
     let f = m.functions.iter().find(|f| f.sig.name == "Made").expect("made");
     assert_eq!((f.origin.file.as_str(), f.origin.line), ("b.j", 3));
     assert!(matches!(&f.body[0], Stmt::Call { call, line: 3 } if call.name == "NopeMade"), "{:?}", f.body);
+    // `//! inject main`: a function of its own, line for line.
+    let m = module(&[Source { name: "t.j", text: "// @dialect vjass\n//! inject main\n//! dovjassinit\n//! endinject\n" }]).unwrap();
+    assert_eq!((m.functions[0].sig.name.as_str(), m.functions[0].origin.line), ("wcb__inject_main", 2));
     // What isn't run yet: an error each.
-    let text = "// @dialect vjass\n//! inject main\n//! dovjassinit\n//! endinject\n";
+    let text = "// @dialect vjass\n//! loaddata \"x.slk\"\n//! external ObjectMerger\n";
     let errors = module(&[Source { name: "t.j", text }]).unwrap_err();
     let found: Vec<(usize, &str)> = errors.iter().map(|e| (e.origin.line, e.message.as_str())).collect();
-    assert_eq!(found, [(2, "JassHelper's `//! inject` isn't read yet"), (3, "JassHelper's `//! dovjassinit` isn't read yet"), (4, "JassHelper's `//! endinject` isn't read yet")]);
+    assert_eq!(found, [(2, "JassHelper's `//! loaddata` isn't read yet"), (3, "JassHelper's `//! external` isn't read yet")]);
 }

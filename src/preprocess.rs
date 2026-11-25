@@ -81,6 +81,13 @@ fn strings(text: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// The function an `//! inject main` (`config`) is made: `wcb__inject_main`.
+pub const INJECT: &str = "wcb__inject_";
+
+/// What an `//! dovjassinit` is made: a call of it, which lowering puts
+/// vJASS's initialization in place of.
+pub const DOVJASSINIT: &str = "wcb__dovjassinit";
+
 /// The files `files` (each a name and its text), their imports with them
 /// (after the file importing them), their macros run.
 pub fn expand(files: &[(&str, &str)], import: &Import) -> Result<Vec<Expanded>, Vec<Error>> {
@@ -126,6 +133,8 @@ pub fn expand(files: &[(&str, &str)], import: &Import) -> Result<Vec<Expanded>, 
     let mut kept: Vec<Vec<(String, usize)>> = Vec::new();
     for (name, text, _) in &all {
         let mut own = Vec::new();
+        // An `//! inject` open: what it replaces, and its line.
+        let mut injecting: Option<(String, usize)> = None;
         let mut lines = text.lines().enumerate();
         while let Some((i, line)) = lines.next() {
             let Some(d) = directive(line) else {
@@ -187,10 +196,36 @@ pub fn expand(files: &[(&str, &str)], import: &Import) -> Result<Vec<Expanded>, 
                         errors.push(error(name, i + 1, "`//! novjass` has no `//! endnovjass`".into()));
                     }
                 }
+                // `//! inject main` ... `//! endinject`: a function of its own,
+                // line for line, which replaces the map's `main` (`config`)
+                // when the code is lowered (`lower`); `//! dovjassinit` in
+                // it, where vJASS's initialization goes.
+                "inject" => {
+                    let what = d[word.len()..].trim();
+                    if !matches!(what, "main" | "config") {
+                        errors.push(error(name, i + 1, format!("`//! inject {what}`: main or config")));
+                    } else if let Some((_, at)) = &injecting {
+                        errors.push(error(name, i + 1, format!("`//! inject` in the `//! inject` of line {at}")));
+                    } else {
+                        own.push((format!("function {INJECT}{what} takes nothing returns nothing"), i + 1));
+                        injecting = Some((what.to_string(), i + 1));
+                    }
+                }
+                "endinject" => match injecting.take() {
+                    Some(_) => own.push(("endfunction".to_string(), i + 1)),
+                    None => errors.push(error(name, i + 1, "`//! endinject` without its `//! inject`".into())),
+                },
+                "dovjassinit" => match &injecting {
+                    Some((what, _)) if what == "main" => own.push((format!("call {DOVJASSINIT}()"), i + 1)),
+                    _ => errors.push(error(name, i + 1, "`//! dovjassinit` is for an `//! inject main` only".into())),
+                },
                 // Read already.
                 "import" => {}
                 _ => own.push((line.to_string(), i + 1)),
             }
+        }
+        if let Some((what, at)) = injecting {
+            errors.push(error(name, at, format!("`//! inject {what}` has no `//! endinject`")));
         }
         kept.push(own);
     }

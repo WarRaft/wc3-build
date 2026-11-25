@@ -327,10 +327,12 @@ fn entry<'a>(m: &'a mut Module, name: &str) -> &'a mut Function {
     m.functions.iter_mut().find(|f| f.sig.name == name).expect("just made")
 }
 
-/// Every `main` into the first one, every `config` into the first one.
+/// Every `main` into the first one, every `config` into the first one (and
+/// every `InitCustomTriggers` of an `//! inject main`).
 fn merge_entries(m: &mut Module) {
-    for name in ["main", "config"] {
-        let parts: Vec<usize> = (0..m.functions.len()).filter(|&i| m.functions[i].sig.name == name && is_entry(&m.functions[i])).collect();
+    // `InitCustomTriggers`: the `main`s an `//! inject main` took the place of.
+    for name in ["main", "config", "InitCustomTriggers"] {
+        let parts: Vec<usize> = (0..m.functions.len()).filter(|&i| m.functions[i].sig.name == name && m.functions[i].sig.params.is_empty() && m.functions[i].sig.returns.is_none()).collect();
         let Some((&first, rest)) = parts.split_first() else { continue };
         let mut taken: HashSet<String> = HashSet::new();
         locals_of(&m.functions[first].body, &mut |n| {

@@ -985,3 +985,42 @@ endfunction
     assert!(out.contains("return s__anarrayofdata[(u - 1) * 6 + 5]"), "{out}");
     assert!(out.contains("return x\n"), "{out}");
 }
+
+#[test]
+fn inject_main_and_config() {
+    let out = build(&[(
+        "t.j",
+        r#"// @dialect vjass
+library L initializer Start
+    private function Start takes nothing returns nothing
+    endfunction
+endlibrary
+function InitTrig_A takes nothing returns nothing
+endfunction
+function main takes nothing returns nothing
+    call InitTrig_A()
+endfunction
+//! inject main
+    call InitBlizzard()
+    //! dovjassinit
+    call InitCustomTriggers()
+//! endinject
+//! inject config
+    call DoNothing()
+//! endinject
+"#,
+    )])
+    .unwrap();
+    // The code's main: InitCustomTriggers; the injected one: main, vJASS's
+    // initialization where //! dovjassinit is.
+    assert!(out.contains("function InitCustomTriggers takes nothing returns nothing\ncall InitTrig_A()\nendfunction"), "{out}");
+    assert!(out.contains("function main takes nothing returns nothing\ncall InitBlizzard()\ncall ExecuteFunc(\"L__Start\")\ncall InitCustomTriggers()\nendfunction"), "{out}");
+    assert!(out.contains("function config takes nothing returns nothing\ncall DoNothing()\nendfunction"), "{out}");
+
+    // Nowhere to initialize vJASS: an error at the inject.
+    let e = build(&[("t.j", "// @dialect vjass\nlibrary L initializer S\n    private function S takes nothing returns nothing\n    endfunction\nendlibrary\n//! inject main\n    call InitCustomTriggers()\n//! endinject\n")]).unwrap_err();
+    assert!(e[0].contains("has no place to run"), "{e:?}");
+    // dovjassinit outside an inject main; an unclosed inject.
+    let e = module(&[Source { name: "t.j", text: "// @dialect vjass\n//! dovjassinit\n//! inject main\n" }]).unwrap_err();
+    assert!(e.iter().any(|m| m.message.contains("for an `//! inject main` only")) && e.iter().any(|m| m.message.contains("has no `//! endinject`")), "{e:?}");
+}
