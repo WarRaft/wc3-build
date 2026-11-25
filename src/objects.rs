@@ -42,7 +42,38 @@ fn mines(list: &str) -> bool {
     list.split(',').any(|a| a.trim() == "Agld")
 }
 
+/// The game's tables of the types [`Objects::add_table`] reads (`Units\`).
+pub const TYPE_TABLES: &[&str] = &["UnitBalance.slk", "UnitUI.slk", "UnitAbilities.slk", "ItemData.slk", "AbilityData.slk"];
+
+/// The game's abilities' texts [`Objects::add_ability_func`] reads
+/// (`Units\`): their orders.
+pub const ABILITY_FUNCS: &[&str] =
+    &["HumanAbilityFunc.txt", "OrcAbilityFunc.txt", "UndeadAbilityFunc.txt", "NightElfAbilityFunc.txt", "NeutralAbilityFunc.txt", "CommonAbilityFunc.txt", "ItemAbilityFunc.txt", "CampaignAbilityFunc.txt"];
+
+/// A random unit, building and item placed (`war3mapUnits.doo`).
+pub const RANDOM_UNIT: Rawcode = Rawcode(*b"uDNR");
+pub const RANDOM_BUILDING: Rawcode = Rawcode(*b"bDNR");
+pub const RANDOM_ITEM: Rawcode = Rawcode(*b"iDNR");
+
 impl Objects {
+    /// What the game's files say (`text` reads one, `Units\UnitBalance.slk`):
+    /// [`TYPE_TABLES`], [`ABILITY_FUNCS`]. The map's object data goes over
+    /// it ([`Objects::add_object_data`]).
+    pub fn of_game(text: &dyn Fn(&str) -> Option<String>) -> Objects {
+        let mut objects = Objects::default();
+        for t in TYPE_TABLES {
+            if let Some(s) = text(&format!("Units\\{t}")) {
+                objects.add_table(&s);
+            }
+        }
+        for t in ABILITY_FUNCS {
+            if let Some(s) = text(&format!("Units\\{t}")) {
+                objects.add_ability_func(&s);
+            }
+        }
+        objects
+    }
+
     /// A table of the game's (`.slk`): `Units\UnitBalance.slk` (`isbldg`),
     /// `Units\unitUI.slk` (`teamColor`), `Units\ItemData.slk` (its ids are
     /// items'), `Units\UnitAbilities.slk` (`abilList`: gold mines),
@@ -193,9 +224,16 @@ impl Objects {
         }
     }
 
-    /// What a type placed is: an item's, a building's, else a unit's.
+    /// What a type placed is: an item's, a building's, else a unit's; a
+    /// random one's what it's random of.
     pub fn placed(&self, id: Rawcode) -> Placed {
-        if self.items.contains(&id) {
+        if id == RANDOM_ITEM {
+            Placed::Item
+        } else if id == RANDOM_BUILDING {
+            Placed::Building
+        } else if id == RANDOM_UNIT {
+            Placed::Unit
+        } else if self.items.contains(&id) {
             Placed::Item
         } else if self.buildings.contains(&id) {
             Placed::Building

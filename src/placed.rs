@@ -24,10 +24,8 @@ const FIXED_Z: u8 = 0x4;
 
 /// Start locations: `config`'s, not made.
 const START_LOCATION: Rawcode = Rawcode(*b"sloc");
-/// A random unit, building and item: what they are is in [`Unit::random`].
-const RANDOM_UNIT: Rawcode = Rawcode(*b"uDNR");
-const RANDOM_BUILDING: Rawcode = Rawcode(*b"bDNR");
-const RANDOM_ITEM: Rawcode = Rawcode(*b"iDNR");
+// A random unit, building and item: what they are is in `Unit::random`.
+use crate::objects::{RANDOM_BUILDING, RANDOM_ITEM, RANDOM_UNIT};
 
 /// How many players a map has before its neutral ones: 24 from 1.29.
 pub fn max_players(info: &w3i_rs::Info) -> u32 {
@@ -50,12 +48,7 @@ pub struct Placing<'a> {
 impl Placing<'_> {
     /// What a placed type is, a random one's too.
     fn kind(&self, id: Rawcode) -> Placed {
-        match id {
-            RANDOM_UNIT => Placed::Unit,
-            RANDOM_BUILDING => Placed::Building,
-            RANDOM_ITEM => Placed::Item,
-            _ => self.objects.placed(id),
-        }
+        self.objects.placed(id)
     }
 }
 

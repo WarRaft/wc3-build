@@ -161,9 +161,9 @@ pub struct Map<'a> {
 /// place and name, each with its JASS type, as a build names them:
 /// regions (`gg_rct_`), cameras (`gg_cam_`), sounds (as the file names
 /// them: `gg_snd_`, a string for music), destructables (`gg_dest_`) and
-/// what `war3mapUnits.doo` places, a unit's and an item's name for each
-/// (`gg_unit_`, `gg_item_`: which it is takes the game's tables, which
-/// this doesn't read; the code names one of them). For what the map's
+/// what `war3mapUnits.doo` places (`gg_unit_`, `gg_item_`: which it is
+/// `objects` say, the game's tables and the map's object data, as a build
+/// tells them; without them, both names for each). For what the map's
 /// code may name (a custom script checked before a build).
 pub fn declared_names(
     regions: Option<&w3r_rs::Regions>,
@@ -171,6 +171,7 @@ pub fn declared_names(
     sounds: Option<&w3s_rs::Sounds>,
     doodads: Option<&doo_rs::Doodads>,
     units: Option<&doo_rs::Units>,
+    objects: Option<&crate::objects::Objects>,
 ) -> Vec<(String, &'static str)> {
     let ident = wtg_rs::jass::ident;
     let mut out = Vec::new();
@@ -178,9 +179,15 @@ pub fn declared_names(
     out.extend(cameras.into_iter().flat_map(|c| &c.cameras).map(|c| (format!("gg_cam_{}", ident(&c.name)), "camerasetup")));
     out.extend(sounds.into_iter().flat_map(|s| &s.sounds).map(|s| (s.name.clone(), if s.flags & w3s_rs::MUSIC != 0 { "string" } else { "sound" })));
     out.extend(doodads.into_iter().flat_map(|d| &d.doodads).map(|d| (crate::placed::name("dest", d.placement.id, d.number), "destructable")));
-    for u in units.into_iter().flat_map(|u| &u.units) {
-        out.push((crate::placed::name("unit", u.placement.id, u.number), "unit"));
-        out.push((crate::placed::name("item", u.placement.id, u.number), "item"));
+    // Start locations are no units: `config`'s.
+    for u in units.into_iter().flat_map(|u| &u.units).filter(|u| u.placement.id != parser_rs::Rawcode(*b"sloc")) {
+        let item = objects.map(|o| o.placed(u.placement.id) == crate::objects::Placed::Item);
+        if item != Some(true) {
+            out.push((crate::placed::name("unit", u.placement.id, u.number), "unit"));
+        }
+        if item != Some(false) {
+            out.push((crate::placed::name("item", u.placement.id, u.number), "item"));
+        }
     }
     out
 }

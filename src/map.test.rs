@@ -91,6 +91,27 @@ fn sounds_as_world_editor_makes_them() {
 fn the_names_the_maps_files_declare() {
     let regions = w3r_rs::Regions { version: 5, regions: vec![w3r_rs::Region::new("Spawn Zone", 0.0, 0.0, 1.0, 1.0, 0)] };
     let cameras = w3c_rs::Cameras { version: 0, layout: w3c_rs::Layout::Classic, cameras: vec![w3c_rs::Camera::new("Intro", 0.0, 0.0)] };
-    let names = declared_names(Some(&regions), Some(&cameras), None, None, None);
+    let names = declared_names(Some(&regions), Some(&cameras), None, None, None, None);
     assert_eq!(names, vec![("gg_rct_Spawn_Zone".to_string(), "rect"), ("gg_cam_Intro".to_string(), "camerasetup")]);
+}
+
+#[test]
+fn a_placed_thing_is_a_unit_or_an_item() {
+    use doo_rs::Unit;
+    let r = |b: &[u8; 4]| parser_rs::Rawcode(*b);
+    let mut footman = Unit::new(r(b"hfoo"), 0.0, 0.0, 0);
+    footman.number = 1;
+    let mut claws = Unit::new(r(b"ratc"), 0.0, 0.0, 15);
+    claws.number = 2;
+    let mut random = Unit::new(r(b"iDNR"), 0.0, 0.0, 15);
+    random.number = 3;
+    let start = Unit::new(r(b"sloc"), 0.0, 0.0, 0);
+    let units = doo_rs::Units { version: 8, subversion: 11, layout: doo_rs::Layout::Classic, units: vec![footman, claws, random, start] };
+    let mut objects = crate::objects::Objects::default();
+    objects.add_table("ID;PWXL;N;E\nC;X1;Y1;K\"itemID\"\nC;X1;Y2;K\"ratc\"\nE\n");
+    let names = |o| declared_names(None, None, None, None, Some(&units), o).into_iter().map(|(n, _)| n).collect::<Vec<_>>();
+    // Told apart by the game's tables; a random item an item; no start location.
+    assert_eq!(names(Some(&objects)), ["gg_unit_hfoo_0001", "gg_item_ratc_0002", "gg_item_iDNR_0003"]);
+    // Without them: both, for each.
+    assert_eq!(names(None).len(), 6);
 }

@@ -31,13 +31,6 @@ const SOUND_TABLES: &[&str] = &[
     "UnitCombatSounds.slk",
 ];
 
-/// The game's tables of the types `Objects` reads (`Units\`).
-const TYPE_TABLES: &[&str] = &["UnitBalance.slk", "UnitUI.slk", "UnitAbilities.slk", "ItemData.slk", "AbilityData.slk"];
-
-/// The game's abilities' texts `Objects` reads (`Units\`): their orders.
-const ABILITY_FUNCS: &[&str] =
-    &["HumanAbilityFunc.txt", "OrcAbilityFunc.txt", "UndeadAbilityFunc.txt", "NightElfAbilityFunc.txt", "NeutralAbilityFunc.txt", "CommonAbilityFunc.txt", "ItemAbilityFunc.txt", "CampaignAbilityFunc.txt"];
-
 /// What a whole script is made of.
 pub struct Input<'a> {
     /// A file by its name in the map or the game (`war3map.w3i`,
@@ -106,17 +99,7 @@ pub fn script(input: &Input) -> Result<Script, Vec<Error>> {
     }
 
     // What the types are: the game's tables, then the map's object data.
-    let mut objects = Objects::default();
-    for t in TYPE_TABLES {
-        if let Some(s) = text(&format!("Units\\{t}")) {
-            objects.add_table(&s);
-        }
-    }
-    for t in ABILITY_FUNCS {
-        if let Some(s) = text(&format!("Units\\{t}")) {
-            objects.add_ability_func(&s);
-        }
-    }
+    let mut objects = Objects::of_game(&text);
     for (name, kind) in [("war3map.w3u", w3abdhqtu_rs::Kind::Unit), ("war3map.w3t", w3abdhqtu_rs::Kind::Item), ("war3map.w3a", w3abdhqtu_rs::Kind::Ability)] {
         if let Some(b) = read(name) {
             objects.add_object_data(&w3abdhqtu_rs::parse(&b, kind).map_err(|e| error(name, format!("{e}")))?);
