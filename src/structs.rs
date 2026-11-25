@@ -29,7 +29,10 @@
 //!   `onInit` runs at map initialization, its modules' before the
 //!   struct's;
 //! - a struct's or interface's type is `integer`; `S(x)` and
-//!   `thistype(x)` are `x`;
+//!   `thistype(x)` are `x`; `S[i]` of an array struct (`extends array`,
+//!   without an `operator []`) is `i`;
+//! - `F.name`, `S.m.name`: the name the function is built with, a string
+//!   (for `ExecuteFunc`);
 //! - `F.evaluate(...)` and `F.execute(...)` of a function or a method go
 //!   through its trigger, the arguments in globals (`wcb__call_F`,
 //!   `wcb__exec_F`, which the JASS output makes);
@@ -213,8 +216,10 @@ impl Types {
 /// `wcb__cast__S(s__R__at(i))` where an `S` goes from an integer,
 /// `wcb__cast__S(x)` from a parent; `0` where an object goes is
 /// `wcb__null()`, `a == b` of objects `wcb__same(a, b)`. Instance 0 is no
-/// object: `S(0).x` is an error. Not yet: `extends array`, `.execute` of
-/// an instance's method.
+/// object: `S(0).x` is an error. A struct `extends array` is no class: its
+/// fields are arrays and its methods functions, as for JASS. `x.m.execute(...)`
+/// of an object runs `wcb__x_S_m(x, ...)` (made here: it calls `x.m(...)`)
+/// as any function's `.execute`; `x.m.evaluate(...)` is `x.m(...)`.
 pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec<Error>) -> Lowered {
     let structs = std::mem::take(&mut m.structs);
     let interfaces = std::mem::take(&mut m.interfaces);
@@ -233,9 +238,6 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
     }
     for s in &structs {
         let err = |errors: &mut Vec<Error>, what: &str| errors.push(Error { origin: s.origin.clone(), message: format!("struct {}: {what} isn't built into JASS yet", s.name) });
-        if classes && s.extends.as_deref() == Some("array") {
-            errors.push(Error { origin: s.origin.clone(), message: format!("struct {} extends array: not built into AngelScript yet", s.name) });
-        }
         match s.size.as_ref().map(literal_int) {
             Some(Some(n)) if n > DEFAULT_SIZE && !classes => err(errors, "more than 8190 instances"),
             Some(None) => err(errors, "a size that isn't a number"),
@@ -314,7 +316,10 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
     let mut instance: HashMap<String, (String, String)> = HashMap::new();
     for s in &structs {
         let info = &types.infos[&s.name];
-        for f in s.fields.iter().filter(|f| !classes || f.is_static) {
+        // A struct `extends array` is its fields' arrays, as for JASS: its
+        // instances are integers, no objects.
+        let class = classes && !info.array;
+        for f in s.fields.iter().filter(|f| !class || f.is_static) {
             let mut g = Global::new(info.field(&f.name), f.ty.clone(), None, s.origin.clone());
             g.constant = f.constant;
             if f.is_static {
@@ -341,7 +346,7 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
                 own_inits += 1;
             }
             f.sig.name = info.method(&f.sig.name);
-            if classes && !me.is_static {
+            if class && !me.is_static {
                 // Lowered with the functions, then back into its class.
                 instance.insert(f.sig.name.clone(), (s.name.clone(), class_method(&me.function.sig.name, &s.name)));
             } else if !me.is_static {
@@ -379,6 +384,7 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
     let globals: HashMap<String, String> = m.globals.iter().map(|g| (g.name.clone(), g.ty.clone())).collect();
     let global_arrays: HashSet<String> = m.globals.iter().filter(|g| g.array).map(|g| g.name.clone()).collect();
     let dispatched: RefCell<BTreeSet<(String, String)>> = RefCell::new(BTreeSet::new());
+    let executed: RefCell<BTreeSet<(String, String)>> = RefCell::new(BTreeSet::new());
     let pointers = Pointers::default();
     for f in &mut m.functions {
         // In a method `thistype` is its struct.
@@ -397,6 +403,7 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
         local_types(&mut f.body, &this_type, &mut locals, &mut arrays);
         let returns = f.sig.returns.clone();
         let cx = Cx {
+            executed: &executed,
             classes,
             takes: &takes,
             returns: returns.as_deref(),
@@ -420,8 +427,9 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
     }
     let mut setup = Vec::new();
     if classes {
-        // The instance methods back into their classes, the classes kept.
-        let mut structs = structs;
+        // The instance methods back into their classes, the classes kept
+        // (an array struct's are functions: it's no class).
+        let mut structs: Vec<Struct> = structs.into_iter().filter(|s| !types.infos[&s.name].array).collect();
         let mut interfaces = interfaces;
         let mut i = 0;
         while i < m.functions.len() {
@@ -449,10 +457,25 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
         }
         m.structs = structs;
         m.interfaces = interfaces;
+        // An object's method run by `.execute`: a function taking it first.
+        for (owner, name) in executed.into_inner() {
+            let Some((_, x)) = types.method(&owner, &name) else { continue };
+            let this_type = |t: &str| if t == "thistype" { owner.clone() } else { t.to_string() };
+            let mut params = vec![Param { ty: owner.clone(), name: format!("{}o", crate::jass::PREFIX) }];
+            params.extend(x.params.iter().map(|p| Param { ty: this_type(&p.ty), name: p.name.clone() }));
+            let call = MethodCall { object: Expr::var(format!("{}o", crate::jass::PREFIX)), name: class_method(&name, &owner), args: x.params.iter().map(|p| Expr::var(p.name.clone())).collect() };
+            m.functions.push(Function {
+                sig: Signature { name: executor(&owner, &name), params, returns: None, constant: false },
+                body: vec![Stmt::CallMethod { call, line: 0 }],
+                owner: Owner::default(),
+                origin: Origin::file("the build"),
+            });
+        }
         function_pointers(m, &types, &pointers, &mut setup);
-        // Function interface types are integers; a struct's stays an object.
+        // Function interface types and array structs are integers; a
+        // struct's stays an object.
         let integer = |t: &mut String| {
-            if types.functions.contains_key(t.as_str()) {
+            if types.functions.contains_key(t.as_str()) || types.infos.get(t.as_str()).is_some_and(|i| i.array) {
                 *t = "integer".into();
             }
         };
@@ -462,7 +485,7 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
             if let Some(r) = &mut f.sig.returns {
                 integer(r);
             }
-            local_types_integer(&mut f.body, &|t| types.functions.contains_key(t));
+            local_types_integer(&mut f.body, &|t| types.functions.contains_key(t) || types.infos.get(t).is_some_and(|i| i.array));
         }
         return Lowered { inits, setup };
     }
@@ -491,6 +514,12 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
         local_types_integer(&mut f.body, &|t| types.infos.contains_key(t) || types.functions.contains_key(t));
     }
     Lowered { inits, setup }
+}
+
+/// The function an object's method `.execute` runs (classes'): it takes
+/// the object first.
+fn executor(owner: &str, m: &str) -> String {
+    format!("{}x_{owner}_{}", crate::jass::PREFIX, class_method(m, owner))
 }
 
 /// An instance method's name in its class: an operator's as
@@ -843,6 +872,8 @@ struct Cx<'a> {
     takes: &'a HashMap<String, Vec<String>>,
     /// What the function gives back.
     returns: Option<&'a str>,
+    /// Classes': the objects' methods run by `.execute` (struct, method).
+    executed: &'a RefCell<BTreeSet<(String, String)>>,
     types: &'a Types,
     /// Functions: what each returns.
     sigs: &'a HashMap<String, Option<String>>,
@@ -904,7 +935,7 @@ impl Cx<'_> {
 
     /// Is `t` a class (AngelScript's)?
     fn is_class(&self, t: &str) -> bool {
-        self.classes && self.types.infos.contains_key(t)
+        self.classes && self.types.infos.get(t).is_some_and(|i| !i.array)
     }
 
     /// `e` (of type `have`) where a `want` goes: with classes, an object's
@@ -945,6 +976,21 @@ impl Cx<'_> {
         self.coerce(e, t.as_deref(), Some("integer"))
     }
 
+    /// The function `e` names as an object (`F`, `S.m`, `thistype.m`): its
+    /// name as built; `None` when it isn't one, or (classes') it's an
+    /// object's method, no function.
+    fn function_name(&self, e: &Expr) -> Option<String> {
+        match e {
+            Expr::Var(f) if self.type_of_var(f).is_none() && self.sigs.contains_key(f) => Some(f.clone()),
+            Expr::Member(o, m) => {
+                let info = self.struct_named(o)?;
+                let (owner, x) = self.types.method(&info.name, m)?;
+                (!self.is_class(&owner.name) || x.is_static).then(|| owner.method(m))
+            }
+            _ => None,
+        }
+    }
+
     /// Arguments lowered, and their types.
     fn args(&self, args: Vec<Expr>, line: usize, errors: &mut Vec<Error>) -> (Vec<Expr>, Vec<Option<String>>) {
         args.into_iter().map(|a| self.expr(a, line, errors)).unzip()
@@ -982,7 +1028,7 @@ impl Cx<'_> {
     fn operator(&self, t: &str, instance: Option<Expr>, op: &str, mut args: Vec<Expr>, line: usize, errors: &mut Vec<Error>) -> (Expr, Option<String>) {
         let name = format!("operator {op}");
         let (owner, x) = self.types.method(t, &name).expect("has_operator");
-        if self.classes && !x.is_static {
+        if self.is_class(t) && !x.is_static {
             return match instance {
                 Some(o) => (Expr::Method(Box::new(MethodCall { object: o, name: class_method(&name, &owner.name), args })), x.returns.clone()),
                 None => {
@@ -1040,7 +1086,7 @@ impl Cx<'_> {
             let v = self.member(t, instance, &d, line, errors).0;
             return self.member(dt, Some(v), name, line, errors);
         }
-        if self.classes
+        if self.is_class(&t)
             && let (Some((_, (ty, false, _, _))), Some(o)) = (self.types.field(&t, name), &instance)
         {
             return (Expr::Member(Box::new(o.clone()), name.to_string()), Some(ty.clone()));
@@ -1164,7 +1210,7 @@ impl Cx<'_> {
             let v = self.member(t, instance, &d, line, errors).0;
             return self.set_member(dt, Some(v), name, index, value, line, errors);
         }
-        if self.classes
+        if self.is_class(&t)
             && let (Some((_, (_, false, _, _))), Some(o)) = (self.types.field(&t, name), &instance)
         {
             return Stmt::SetMember { object: o.clone(), name: name.to_string(), index, value, line };
@@ -1220,6 +1266,13 @@ impl Cx<'_> {
                 if let Some((t, o)) = self.indexed(&n).filter(|(t, _)| self.has_operator(t, "[]")) {
                     return self.operator(&t, o, "[]", vec![i], line, errors);
                 }
+                // `S[i]` of an array struct (`extends array`): its instance `i`.
+                if !self.is_array(&n)
+                    && self.type_of_var(&n).is_none()
+                    && let Some(info) = self.struct_named(&Expr::Var(n.clone())).filter(|info| info.array)
+                {
+                    return (i, Some(info.name.clone()));
+                }
                 let t = self.type_of_var(&n);
                 (Expr::Index(n, Box::new(i)), t)
             }
@@ -1251,6 +1304,12 @@ impl Cx<'_> {
                 }
                 None => (Expr::Code(n), Some("code".into())),
             },
+            // `F.name`, `S.m.name`: the name the function is built with, for
+            // `ExecuteFunc` and the like.
+            Expr::Member(object, name) if name == "name" && self.function_name(&object).is_some() => {
+                let f = self.function_name(&object).expect("checked");
+                (Expr::string(&f), Some("string".into()))
+            }
             // `I.f`: the number of `f` among `I`'s functions.
             Expr::Member(object, name) if matches!(&*object, Expr::Var(i) if self.types.functions.contains_key(i) && self.type_of_var(i).is_none()) => {
                 let Expr::Var(i) = *object else { unreachable!() };
@@ -1284,7 +1343,7 @@ impl Cx<'_> {
                             return (Expr::lit("0"), None);
                         };
                         // An array field's element.
-                        if self.classes
+                        if self.is_class(&t)
                             && let (Some((_, (ty, false, _, true))), Some(o)) = (self.types.field(&t, &name), &instance)
                         {
                             return (Expr::Element(Box::new(Expr::Member(Box::new(o.clone()), name.clone())), Box::new(i)), Some(ty.clone()));
@@ -1375,15 +1434,19 @@ impl Cx<'_> {
                     };
                     if let Some((owner, x)) = t.as_deref().and_then(|t| self.types.method(t, mname)) {
                         // An object's method: `.evaluate` called straight
-                        // (in the same thread, as evaluate runs it).
-                        if self.classes && !x.is_static {
+                        // (in the same thread, as evaluate runs it);
+                        // `.execute` through a function taking the object
+                        // first (`wcb__x_S_m`), run as any function's.
+                        if self.is_class(&owner.name) && !x.is_static {
                             let want: Vec<String> = x.params.iter().map(|p| p.ty.clone()).collect();
                             let args = self.coerce_args(args, &have, Some(&want));
                             return match (instance, name.as_str()) {
                                 (Some(o), "evaluate") => (Expr::Method(Box::new(MethodCall { object: o, name: class_method(mname, &owner.name), args })), x.returns.clone()),
-                                (Some(_), _) => {
-                                    self.error(errors, line, format!("{}.{mname}.execute: an object's method in a thread of its own isn't built into AngelScript yet", owner.name));
-                                    (Expr::lit("0"), None)
+                                (Some(o), _) => {
+                                    self.executed.borrow_mut().insert((owner.name.clone(), mname.clone()));
+                                    let mut args = args;
+                                    args.insert(0, o);
+                                    (call(format!("{}exec_{}", crate::jass::PREFIX, executor(&owner.name, mname)), args), None)
                                 }
                                 (None, _) => {
                                     self.error(errors, line, format!("{}.{mname}: a method of an instance", owner.name));
@@ -1413,7 +1476,7 @@ impl Cx<'_> {
                 Some((owner, x)) if !x.abstract_ => {
                     let want: Vec<String> = x.params.iter().map(|p| p.ty.clone()).collect();
                     let args = self.coerce_args(args, &have, Some(&want));
-                    if self.classes && !x.is_static {
+                    if self.is_class(&owner.name) && !x.is_static {
                         return (call(format!("{}::{}", owner.name, class_method(&name, &owner.name)), args), x.returns.clone());
                     }
                     let mut args = args;
@@ -1488,7 +1551,7 @@ impl Cx<'_> {
     fn instance_method(&self, o: Expr, t: String, name: String, mut args: Vec<Expr>, line: usize, errors: &mut Vec<Error>) -> (Expr, Option<String>) {
         let call = |name: String, args: Vec<Expr>| Expr::Call(Call { name, args });
         let several = self.types.several(&t);
-        if self.classes {
+        if self.is_class(&t) {
             let root = self.types.root(&t).to_string();
             match name.as_str() {
                 "destroy" | "deallocate" if self.types.method(&t, &name).is_none() => return (call(format!("s__{root}__{name}"), vec![o]), None),
@@ -1528,7 +1591,7 @@ impl Cx<'_> {
         };
         let returns = x.returns.clone();
         let is_static = x.is_static;
-        if self.classes {
+        if self.is_class(&t) {
             return match is_static {
                 true => (call(owner.method(&name), args), returns),
                 false => (Expr::Method(Box::new(MethodCall { object: o, name: class_method(&name, &owner.name), args })), returns),

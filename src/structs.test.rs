@@ -558,3 +558,33 @@ endscope
     }
     assert!(!out.contains("Store API"), "{out}");
 }
+
+#[test]
+fn array_struct_indexed_and_names() {
+    let out = build(&[(
+        "t.j",
+        r#"// @dialect vjass
+struct playerdata extends array
+    integer a
+endstruct
+struct mystruct
+    static method mymethod takes nothing returns nothing
+    endmethod
+endstruct
+scope test
+    public function xxx takes nothing returns nothing
+        call BJDebugMsg(xxx.name)
+    endfunction
+endscope
+function init takes nothing returns nothing
+    set playerdata[3].a = playerdata[2].a
+    call ExecuteFunc(mystruct.mymethod.name)
+endfunction
+"#,
+    )])
+    .unwrap();
+    // `S[i]` of an array struct: instance i; `.name`: the name built.
+    assert!(out.contains("set s__playerdata_a[3] = s__playerdata_a[2]"), "{out}");
+    assert!(out.contains("call ExecuteFunc(\"s__mystruct_mymethod\")"), "{out}");
+    assert!(out.contains("call BJDebugMsg(\"test_xxx\")"), "{out}");
+}

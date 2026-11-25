@@ -127,8 +127,13 @@ Shape isn't built into JASS yet").
   named when the name is worked out before the game runs (literals, `+`
   of them, constants of them: `unroll_execute_func`, after lowering, so
   a `Blizzard.j` function called so is taken in); else it's left and is
-  one of `Built::problems`, which don't stop the script. Not yet:
-  `extends array`, `.execute` of an object's method.
+  one of `Built::problems`, which don't stop the script. A struct
+  `extends array` (the manual's array struct: its instances integers,
+  no `allocate`) stays JASS's form, its fields `WC3::` arrays and its
+  methods functions; `x.m.execute(...)` of an object runs a function
+  taking it first (`wcb__x_S_m`) through a trigger, as any function's;
+  `S[i]` of an array struct is instance `i`, and `F.name`, `S.m.name`
+  the name built (JASS's output too).
 - **`lower`** (the build's stage 4): what vJASS and Zinc add, made into
   JASS, for the JASS output; for AngelScript all of it but structs and
   interfaces (`lower_for`).

@@ -308,9 +308,6 @@ endfunction
     ] {
         assert!(out.contains(part), "{part}\nnot in:\n{out}");
     }
-    // An object's method in a thread of its own: not yet.
-    let e = angelscript_vjass("struct V\n    method m takes nothing returns nothing\n    endmethod\nendstruct\nfunction F takes V v returns nothing\n    call v.m.execute()\nendfunction\n").unwrap_err();
-    assert!(e.iter().any(|e| e.contains("execute")), "{e:?}");
 }
 
 #[test]
@@ -349,4 +346,62 @@ endfunction
     assert!(lines[1].1.contains("DoB takes arguments"), "{lines:?}");
     assert!(lines[2].1.contains("no function Nowhere"), "{lines:?}");
     assert!(lines[3].1.contains("StartTimerBJ takes arguments"), "{lines:?}");
+}
+
+#[test]
+fn array_structs_execute_and_names() {
+    let out = angelscript_vjass(r#"
+struct playerdata extends array
+    integer a
+    integer b
+    method sum takes nothing returns integer
+        return this.a + this.b
+    endmethod
+endstruct
+struct Fx
+    real t
+    method wait takes real extra returns nothing
+        call TriggerSleepAction(this.t + extra)
+    endmethod
+endstruct
+struct mystruct
+    static method mymethod takes nothing returns nothing
+        call BJDebugMsg("this works")
+    endmethod
+endstruct
+scope test
+    public function xxx takes nothing returns nothing
+        call BJDebugMsg(xxx.name)
+    endfunction
+endscope
+function init takes nothing returns nothing
+    local playerdata pd
+    local Fx f = Fx.create()
+    set playerdata[3].a = 12
+    set pd = playerdata[4]
+    set pd.b = 111
+    set playerdata[3].a = playerdata[3].b + pd.sum()
+    call f.wait.execute(1.)
+    call ExecuteFunc(mystruct.mymethod.name)
+endfunction
+"#)
+    .unwrap_or_else(|e| panic!("{e:?}"));
+    for part in [
+        // An array struct: its fields arrays, its instances integers.
+        "WC3::int_array s__playerdata_a;\nWC3::int_array s__playerdata_b;\n",
+        // `this` is AngelScript's word: a function's parameter is prefixed.
+        "int s__playerdata_sum(int wcb__this) {\n    return s__playerdata_a[wcb__this] + s__playerdata_b[wcb__this];\n}",
+        "    int pd = 0;\n    Fx@ f = s__Fx__allocate();\n    s__playerdata_a[3] = 12;\n    pd = 4;\n    s__playerdata_b[pd] = 111;\n    s__playerdata_a[3] = s__playerdata_b[3] + s__playerdata_sum(pd);\n",
+        // An object's method in a thread of its own: through a function taking it.
+        "    wcb__exec_wcb__x_Fx_wait(f, 1.0f);\n",
+        "void wcb__x_Fx_wait(Fx@ wcb__o, float extra) {\n    wcb__o.wait(extra);\n}",
+        "Fx@ wcb__arg_wcb__x_Fx_wait_0 = null;",
+        "void wcb__exec_wcb__x_Fx_wait(Fx@ wcb__o, float extra) {\n    @wcb__arg_wcb__x_Fx_wait_0 = wcb__o;\n    wcb__arg_wcb__x_Fx_wait_1 = extra;\n    Jass::TriggerExecute(wcb__trig_wcb__x_Fx_wait);\n}",
+        // `.name`: the name built; ExecuteFunc of it a call.
+        "    s__mystruct_mymethod();\n",
+        "void test_xxx() {\n    Jass::BJDebugMsg(\"test_xxx\");\n}",
+    ] {
+        assert!(out.contains(part), "{part}\nnot in:\n{out}");
+    }
+    assert!(!out.contains("class playerdata"), "{out}");
 }
