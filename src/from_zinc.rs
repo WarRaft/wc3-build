@@ -199,7 +199,8 @@ impl Reader<'_> {
                         owner: Owner { scope: self.scope.clone(), access: Access::Everyone },
                         origin: self.origin(f.sig.line),
                     };
-                    methods.push(Method { function, is_static, stub, private, abstract_: f.body.is_none(), defaults: None });
+                    let defaults = f.defaults.as_ref().map(|e| self.expr(e));
+                    methods.push(Method { function, is_static, stub, private, abstract_: f.body.is_none(), defaults });
                 }
                 z::StructMember::Implement { name, optional, .. } => mixins.push((name.clone(), *optional)),
             }
