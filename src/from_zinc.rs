@@ -134,6 +134,7 @@ impl Reader<'_> {
                     fields,
                     methods,
                     mixins,
+                    static_ifs: Vec::new(),
                     origin: self.origin(s.line),
                 };
                 self.m.structs.push(st);
@@ -145,7 +146,7 @@ impl Reader<'_> {
             }
             z::Member::Module(t) => {
                 let (fields, methods, mixins) = self.members(&t.members);
-                let x = Mixin { name: t.name.clone(), owner: self.owner(&t.modifiers), fields, methods, mixins, origin: self.origin(t.line) };
+                let x = Mixin { name: t.name.clone(), owner: self.owner(&t.modifiers), fields, methods, mixins, static_ifs: Vec::new(), origin: self.origin(t.line) };
                 self.m.mixins.push(x);
             }
             // A function type: a function interface.

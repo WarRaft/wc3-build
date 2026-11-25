@@ -43,6 +43,21 @@ pub struct Module {
     /// JassHelper's `//! external`s: tools run on the map once it's
     /// built, in their order.
     pub externals: Vec<External>,
+    /// vJASS's `static if` around declarations: which branch is the map's
+    /// is known once every file is read (`lower` chooses).
+    pub static_ifs: Vec<StaticBlock>,
+}
+
+/// A `static if` around declarations: `then` when `cond` is true, else
+/// `otherwise` (an `elseif`'s a `static if` of its own in it).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StaticBlock {
+    pub cond: Expr,
+    pub then: Module,
+    pub otherwise: Module,
+    /// The library or scope it's in, whose constants it may read.
+    pub owner: Owner,
+    pub origin: Origin,
 }
 
 /// JassHelper's `//! external NAME args` (`//! externalblock`: with the
@@ -136,7 +151,38 @@ pub struct Struct {
     pub methods: Vec<Method>,
     /// The modules it takes in, and whether only if they're there.
     pub mixins: Vec<(String, bool)>,
+    /// `static if`s among its members: `lower` chooses.
+    pub static_ifs: Vec<MemberBlock>,
     pub origin: Origin,
+}
+
+/// Members of a struct or module: what a `static if` among them chooses.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Members {
+    pub fields: Vec<Field>,
+    pub methods: Vec<Method>,
+    pub mixins: Vec<(String, bool)>,
+    pub static_ifs: Vec<MemberBlock>,
+}
+
+/// A `static if` among members: `then` when `cond` is true, else
+/// `otherwise` (an `elseif`'s one of its own in it).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemberBlock {
+    pub cond: Expr,
+    pub then: Members,
+    pub otherwise: Members,
+    pub origin: Origin,
+}
+
+impl Members {
+    /// `other`'s added.
+    pub fn append(&mut self, other: Members) {
+        self.fields.extend(other.fields);
+        self.methods.extend(other.methods);
+        self.mixins.extend(other.mixins);
+        self.static_ifs.extend(other.static_ifs);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -193,6 +239,8 @@ pub struct Mixin {
     pub fields: Vec<Field>,
     pub methods: Vec<Method>,
     pub mixins: Vec<(String, bool)>,
+    /// `static if`s among its members: `lower` chooses.
+    pub static_ifs: Vec<MemberBlock>,
     pub origin: Origin,
 }
 
@@ -698,10 +746,21 @@ impl Module {
         self.globals.iter_mut().for_each(|g| g.origin.line = to(g.origin.line));
         self.functions.iter_mut().for_each(function);
         self.libraries.iter_mut().for_each(|l| l.origin.line = to(l.origin.line));
+        fn blocks(bs: &mut [MemberBlock], to: &dyn Fn(usize) -> usize, fields: &dyn Fn(&mut Vec<Field>), methods: &dyn Fn(&mut Vec<Method>)) {
+            for b in bs {
+                b.origin.line = to(b.origin.line);
+                for m in [&mut b.then, &mut b.otherwise] {
+                    fields(&mut m.fields);
+                    methods(&mut m.methods);
+                    blocks(&mut m.static_ifs, to, fields, methods);
+                }
+            }
+        }
         for s in &mut self.structs {
             s.origin.line = to(s.origin.line);
             fields(&mut s.fields);
             methods(&mut s.methods);
+            blocks(&mut s.static_ifs, to, &fields, &methods);
         }
         for i in &mut self.interfaces {
             i.origin.line = to(i.origin.line);
@@ -711,9 +770,15 @@ impl Module {
             x.origin.line = to(x.origin.line);
             fields(&mut x.fields);
             methods(&mut x.methods);
+            blocks(&mut x.static_ifs, to, &fields, &methods);
         }
         self.function_types.iter_mut().for_each(|t| t.origin.line = to(t.origin.line));
         self.hooks.iter_mut().for_each(|h| h.origin.line = to(h.origin.line));
+        for s in &mut self.static_ifs {
+            s.origin.line = to(s.origin.line);
+            s.then.map_lines(to);
+            s.otherwise.map_lines(to);
+        }
     }
 
     pub fn append(&mut self, other: Module) {
@@ -728,6 +793,7 @@ impl Module {
         self.function_types.extend(other.function_types);
         self.hooks.extend(other.hooks);
         self.externals.extend(other.externals);
+        self.static_ifs.extend(other.static_ifs);
     }
 
     /// What of vJASS and Zinc the module still has, which only lowering

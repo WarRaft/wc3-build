@@ -52,6 +52,9 @@ pub fn lower_with(m: &Module, game: &[Signature]) -> Result<Module, Vec<Error>> 
 pub fn lower_for(m: &Module, game: &[Signature], classes: bool) -> Result<Module, Vec<Error>> {
     let mut m = m.clone();
     let mut errors = Vec::new();
+    // `static if`s around declarations first: what they choose takes part
+    // in all the rest (a library in one is ordered as any).
+    choose_static_blocks(&mut m, &mut errors);
     let order = library_order(&m, &mut errors);
     if !errors.is_empty() {
         return Err(errors);
@@ -698,6 +701,74 @@ fn static_ifs(body: Vec<Stmt>, file: &str, library: &dyn Fn(&str) -> bool, const
         }
     }
     out
+}
+
+/// Each `static if` around declarations: the branch its condition chooses
+/// made the module's, until none is left (one in a branch chosen is
+/// chosen next). The libraries there are and the constant booleans of the
+/// block's library or scope, or of the top, decide.
+fn choose_static_blocks(m: &mut Module, errors: &mut Vec<Error>) {
+    while !m.static_ifs.is_empty() {
+        let blocks = std::mem::take(&mut m.static_ifs);
+        let present: HashSet<String> = m.libraries.iter().map(|l| l.name.clone()).collect();
+        let mut constants: HashMap<(Option<String>, String), bool> = HashMap::new();
+        for g in m.globals.iter().filter(|g| g.constant && g.ty == "boolean") {
+            if let Some(Expr::Literal(v)) = &g.init
+                && let Ok(b) = v.parse::<bool>()
+            {
+                constants.insert((g.owner.scope.clone(), g.name.clone()), b);
+            }
+        }
+        for b in blocks {
+            let library = |n: &str| present.contains(n);
+            let constant =
+                |n: &str| constants.get(&(b.owner.scope.clone(), n.to_string())).or_else(|| constants.get(&(None, n.to_string()))).copied();
+            match constant_bool(&b.cond, &library, &constant) {
+                Some(true) => m.append(b.then),
+                Some(false) => m.append(b.otherwise),
+                None => errors.push(Error { origin: b.origin, message: "a `static if` of what isn't a constant boolean".into() }),
+            }
+        }
+    }
+    // Among a struct's or module's members, by its library's constants.
+    let present: HashSet<String> = m.libraries.iter().map(|l| l.name.clone()).collect();
+    let mut constants: HashMap<(Option<String>, String), bool> = HashMap::new();
+    for g in m.globals.iter().filter(|g| g.constant && g.ty == "boolean") {
+        if let Some(Expr::Literal(v)) = &g.init
+            && let Ok(b) = v.parse::<bool>()
+        {
+            constants.insert((g.owner.scope.clone(), g.name.clone()), b);
+        }
+    }
+    let choose = |scope: &Option<String>, blocks: Vec<MemberBlock>, into: &mut Members, errors: &mut Vec<Error>| {
+        let library = |n: &str| present.contains(n);
+        let constant = |n: &str| constants.get(&(scope.clone(), n.to_string())).or_else(|| constants.get(&(None, n.to_string()))).copied();
+        let mut pending = blocks;
+        while !pending.is_empty() {
+            for b in std::mem::take(&mut pending) {
+                match constant_bool(&b.cond, &library, &constant) {
+                    Some(true) => into.append(b.then),
+                    Some(false) => into.append(b.otherwise),
+                    None => errors.push(Error { origin: b.origin, message: "a `static if` of what isn't a constant boolean".into() }),
+                }
+            }
+            pending = std::mem::take(&mut into.static_ifs);
+        }
+    };
+    for s in &mut m.structs {
+        let mut chosen = Members::default();
+        choose(&s.owner.scope, std::mem::take(&mut s.static_ifs), &mut chosen, errors);
+        s.fields.extend(chosen.fields);
+        s.methods.extend(chosen.methods);
+        s.mixins.extend(chosen.mixins);
+    }
+    for x in &mut m.mixins {
+        let mut chosen = Members::default();
+        choose(&x.owner.scope, std::mem::take(&mut x.static_ifs), &mut chosen, errors);
+        x.fields.extend(chosen.fields);
+        x.methods.extend(chosen.methods);
+        x.mixins.extend(chosen.mixins);
+    }
 }
 
 /// What a `static if`'s condition is.

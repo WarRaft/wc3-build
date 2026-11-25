@@ -105,3 +105,43 @@ fn a_triggers_init_its_code_hasnt_isnt_called() {
     let out = built(&[("t.j", triggers), ("c.j", code)]);
     assert!(out.contains("call InitTrig_Other()") && !out.contains("InitTrig_Lock"), "{out}");
 }
+
+/// vJASS as real libraries write it (three-corridors).
+#[test]
+fn real_libraries_vjass_built() {
+    let text = concat!(
+        "// @dialect vjass\n",
+        "library Tools requires /* */ Base /* */ optional Missing\n",
+        "    globals\n        private constant boolean VERBOSE = true\n    endglobals\n",
+        "    static if DEBUG_MODE then\n",
+        "        private function Say takes string s returns nothing\n            call BJDebugMsg(\"debug \" + s)\n        endfunction\n",
+        "    elseif LIBRARY_Missing then\n",
+        "        private function Say takes string s returns nothing\n            call Missing(s)\n        endfunction\n",
+        "    elseif VERBOSE then\n",
+        "        private function Say takes string s returns nothing\n            call BJDebugMsg(s)\n        endfunction\n",
+        "    endif\n",
+        "    function Hello takes nothing returns nothing\n        call Say(\"hi\")\n    endfunction\n",
+        "endlibrary\n",
+        "library Base\n    globals\n        constant boolean VERBOSE = true\n    endglobals\n",
+        "    struct Node\n        debug boolean checked\n        integer v\n        static if VERBOSE then\n            static integer made = 0\n        else\n            static integer never = 0\n        endif\n",
+        "        static method create takes nothing returns Node\n            debug local integer probe = 1\n            local Node this = Node.allocate()\n            set this.v = 1\n            return this\n        endmethod\n",
+        "        method operator [] takes integer i returns integer\n            return this.v + i\n        endmethod\n",
+        "        method operator []= takes integer i, integer x returns nothing\n            set this.v = i + x\n        endmethod\n",
+        "        method twice takes nothing returns nothing\n            set Node(this)[1] = Node(this)[2]\n        endmethod\n",
+        "    endstruct\n",
+        "endlibrary\n",
+        "function main takes nothing returns nothing\n    call Hello()\n    call Node.create()\nendfunction\n",
+        "function config takes nothing returns nothing\nendfunction\n",
+    );
+    let m = crate::from_jass::module(&[crate::from_jass::Source { name: "t.j", text }]).unwrap_or_else(|e| panic!("{e:?}"));
+    let out = crate::jass::build(&m).unwrap_or_else(|e| panic!("{e:?}"));
+    crate::structs::tests::as_the_games(&out);
+    // VERBOSE's branch: neither debug mode's nor the missing library's.
+    assert!(out.contains("call BJDebugMsg(s)") && !out.contains("\"debug \"") && !out.contains("Missing("), "{out}");
+    // No debug member: one array a field.
+    assert!(!out.contains("checked") && !out.contains("probe"), "{out}");
+    // A member's static if: its library's constant chose.
+    assert!(out.contains("made") && !out.contains("never"), "{out}");
+    // A cast's element set: its `[]=`, of its `[]`.
+    assert!(out.contains("call s__Node__setindex(this, 1, s__Node__getindex(this, 2))"), "{out}");
+}

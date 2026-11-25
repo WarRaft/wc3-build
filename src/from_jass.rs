@@ -193,7 +193,7 @@ impl Reader<'_> {
                     self.items(m, f, &l.items, Some(&name), errors);
                 }
                 j::TopLevel::Struct(st) => {
-                    let (fields, methods, mixins) = self.members(&st.members, scope);
+                    let Members { fields, methods, mixins, static_ifs } = self.members(&st.members, scope);
                     m.structs.push(Struct {
                         name: st.name.clone(),
                         owner: owner(scope, &st.modifiers),
@@ -202,21 +202,43 @@ impl Reader<'_> {
                         fields,
                         methods,
                         mixins,
+                        static_ifs,
                         origin: self.origin(st.line),
                     });
                 }
                 j::TopLevel::Interface(t) => {
-                    let (fields, methods, _) = self.members(&t.members, scope);
+                    let Members { fields, methods, .. } = self.members(&t.members, scope);
                     m.interfaces.push(Interface { name: t.name.clone(), owner: owner(scope, &t.modifiers), fields, size: t.size.as_ref().map(|e| self.expr(e)), methods, origin: self.origin(t.line) });
                 }
                 j::TopLevel::Module(t) => {
-                    let (fields, methods, mixins) = self.members(&t.members, scope);
-                    m.mixins.push(Mixin { name: t.name.clone(), owner: owner(scope, &t.modifiers), fields, methods, mixins, origin: self.origin(t.line) });
+                    let Members { fields, methods, mixins, static_ifs } = self.members(&t.members, scope);
+                    m.mixins.push(Mixin { name: t.name.clone(), owner: owner(scope, &t.modifiers), fields, methods, mixins, static_ifs, origin: self.origin(t.line) });
                 }
                 j::TopLevel::FunctionInterface(sig) => {
                     m.function_types.push(FunctionType { sig: signature(sig), owner: owner(scope, &sig.modifiers), origin: self.origin(sig.line) })
                 }
                 j::TopLevel::Keyword { .. } => {}
+                // Each branch read as declarations of its own; the build
+                // chooses (`lower`).
+                j::TopLevel::StaticIf { branches, else_branch, line, .. } => {
+                    let mut otherwise = Module::default();
+                    if let Some(b) = else_branch {
+                        self.items(&mut otherwise, f, b, scope, errors);
+                    }
+                    for (cond, b) in branches.iter().rev() {
+                        let mut then = Module::default();
+                        self.items(&mut then, f, b, scope, errors);
+                        let block = StaticBlock {
+                            cond: self.expr(cond),
+                            then,
+                            otherwise: std::mem::take(&mut otherwise),
+                            owner: Owner { scope: scope.map(String::from), access: Access::Everyone },
+                            origin: self.origin(*line),
+                        };
+                        otherwise.static_ifs.push(block);
+                    }
+                    m.static_ifs.extend(otherwise.static_ifs);
+                }
                 j::TopLevel::Hook { name, target, line } => {
                     m.hooks.push(Hook { name: name.clone(), target: target.clone(), owner: owner(scope, &j::Modifiers::default()), origin: self.origin(*line) })
                 }
@@ -225,9 +247,15 @@ impl Reader<'_> {
     }
 
     /// A struct's, interface's or module's members.
-    fn members(&self, members: &[j::StructMember], scope: Option<&str>) -> (Vec<Field>, Vec<Method>, Vec<(String, bool)>) {
-        let (mut fields, mut methods, mut mixins) = (Vec::new(), Vec::new(), Vec::new());
+    fn members(&self, members: &[j::StructMember], scope: Option<&str>) -> Members {
+        let (mut fields, mut methods, mut mixins, mut static_ifs) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for member in members {
+            // A debug mode's only: a build isn't one (`DEBUG_MODE` is false).
+            match member {
+                j::StructMember::Field(g) if g.modifiers.is_debug => continue,
+                j::StructMember::Method(md) if md.sig.modifiers.is_debug => continue,
+                _ => {}
+            }
             match member {
                 j::StructMember::Field(g) => fields.push(Field {
                     name: g.name.clone(),
@@ -258,9 +286,18 @@ impl Reader<'_> {
                     });
                 }
                 j::StructMember::Implement { name, optional, .. } => mixins.push((name.clone(), *optional)),
+                // Each branch's members; the build chooses (`lower`).
+                j::StructMember::StaticIf { branches, else_branch, line, .. } => {
+                    let mut otherwise = else_branch.as_ref().map(|b| self.members(b, scope)).unwrap_or_default();
+                    for (cond, b) in branches.iter().rev() {
+                        let block = MemberBlock { cond: self.expr(cond), then: self.members(b, scope), otherwise, origin: self.origin(*line) };
+                        otherwise = Members { static_ifs: vec![block], ..Members::default() };
+                    }
+                    static_ifs.extend(otherwise.static_ifs);
+                }
             }
         }
-        (fields, methods, mixins)
+        Members { fields, methods, mixins, static_ifs }
     }
 
     fn global(&self, g: &j::GlobalDecl, scope: Option<&str>) -> Global {
@@ -282,7 +319,18 @@ impl Reader<'_> {
     }
 
     fn stmts(&self, body: &[j::Stmt]) -> Vec<Stmt> {
-        body.iter().map(|s| self.stmt(s)).collect()
+        body.iter()
+            // A debug line the game has no debug form of (`debug local`,
+            // `debug return`: vJASS's) is taken out, as JassHelper does out
+            // of debug mode; `debug set` ... the game skips itself.
+            .filter(|s| match s {
+                j::Stmt::Debug { stmt, .. } => {
+                    matches!(&**stmt, j::Stmt::Set { .. } | j::Stmt::Call { .. } | j::Stmt::If { .. } | j::Stmt::Loop { .. } | j::Stmt::SetMember { .. } | j::Stmt::CallMethod { .. })
+                }
+                _ => true,
+            })
+            .map(|s| self.stmt(s))
+            .collect()
     }
 
     fn stmt(&self, s: &j::Stmt) -> Stmt {
@@ -313,7 +361,9 @@ impl Reader<'_> {
             j::Stmt::Return { value, line } => Stmt::Return { value: value.as_ref().map(|e| self.expr(e)), line: *line },
             j::Stmt::Debug { stmt, line } => Stmt::Debug { stmt: Box::new(self.stmt(stmt)), line: *line },
             // `a[i][j] = v`: an element of `a[i]`.
-            j::Stmt::SetMember { target, index: Some(j), value, line, .. } if matches!(target.kind, j::ExprKind::ArrayAccess(..)) => {
+            // An element of what isn't a member: an array's element's, a
+            // cast's (`Table(this)[i]`: its `[]=`).
+            j::Stmt::SetMember { target, index: Some(j), value, line, .. } if !matches!(target.kind, j::ExprKind::Member(..)) => {
                 Stmt::SetElement { target: self.expr(target), index: self.expr(j), value: self.expr(value), line: *line }
             }
             j::Stmt::SetMember { target, index, value, line, .. } => {
