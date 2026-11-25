@@ -328,6 +328,93 @@ fn names_in_global(g: &Global, out: &mut Vec<String>) {
     }
 }
 
+/// A JASS string literal's value (`"a\\b"` is `a\b`).
+fn string_value(lit: &str) -> Option<String> {
+    let inner = lit.strip_prefix('"')?.strip_suffix('"')?;
+    let mut out = String::new();
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next()? {
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            'b' => out.push('\u{8}'),
+            'f' => out.push('\u{c}'),
+            c => out.push(c),
+        }
+    }
+    Some(out)
+}
+
+/// The string `e` is before the game runs: literals, `+` of them, the
+/// constants they make; `None` when it's told only as it runs.
+fn constant_string(e: &Expr, constants: &HashMap<&str, &Expr>, depth: usize) -> Option<String> {
+    if depth > 32 {
+        return None;
+    }
+    match e {
+        Expr::Literal(l) => string_value(l),
+        Expr::Binary(a, BinOp::Add, b) => Some(constant_string(a, constants, depth + 1)? + &constant_string(b, constants, depth + 1)?),
+        Expr::Var(n) => constant_string(constants.get(n.as_str())?, constants, depth + 1),
+        _ => None,
+    }
+}
+
+/// AngelScript has no `ExecuteFunc`: each `ExecuteFunc(name)` whose name
+/// can be told before the game runs ([`constant_string`]) is a call of
+/// that function, taking nothing, of the module's (or of `Blizzard.j`'s:
+/// `blizzard`); any other is left as it is and is a problem each.
+pub fn unroll_execute_func(m: &mut Module, blizzard: &Module) -> Vec<Error> {
+    let constants: HashMap<String, Expr> = m.globals.iter().chain(&blizzard.globals).filter(|g| g.constant && !g.array).filter_map(|g| Some((g.name.clone(), g.init.clone()?))).collect();
+    let constants: HashMap<&str, &Expr> = constants.iter().map(|(n, e)| (n.as_str(), e)).collect();
+    let takes: HashMap<String, usize> = m.functions.iter().chain(&blizzard.functions).map(|f| (f.sig.name.clone(), f.sig.params.len())).collect();
+    let mut problems = Vec::new();
+    fn walk(body: &mut [Stmt], file: &str, constants: &HashMap<&str, &Expr>, takes: &HashMap<String, usize>, problems: &mut Vec<Error>) {
+        for s in body {
+            match s {
+                Stmt::Call { call, line } if call.name == "ExecuteFunc" && call.args.len() == 1 => {
+                    let origin = Origin { file: file.to_string(), line: *line };
+                    match constant_string(&call.args[0], constants, 0) {
+                        Some(name) if takes.get(&name) == Some(&0) => *call = Call { name, args: Vec::new() },
+                        Some(name) if takes.contains_key(&name) => problems.push(Error { origin, message: format!("ExecuteFunc(\"{name}\"): {name} takes arguments, which ExecuteFunc can't give (AngelScript has no ExecuteFunc: left as it is)") }),
+                        Some(name) => problems.push(Error { origin, message: format!("ExecuteFunc(\"{name}\"): there's no function {name} (AngelScript has no ExecuteFunc: left as it is)") }),
+                        None => problems.push(Error {
+                            origin,
+                            message: "ExecuteFunc of a name told only as the game runs: AngelScript has no ExecuteFunc, and which function it calls can't be worked out (left as it is)".into(),
+                        }),
+                    }
+                }
+                Stmt::If { branches, otherwise, .. } => {
+                    for (_, b) in branches.iter_mut() {
+                        walk(b, file, constants, takes, problems);
+                    }
+                    if let Some(b) = otherwise {
+                        walk(b, file, constants, takes, problems);
+                    }
+                }
+                Stmt::Loop { body, .. } => walk(body, file, constants, takes, problems),
+                Stmt::Debug { stmt, .. } => walk(std::slice::from_mut(&mut **stmt), file, constants, takes, problems),
+                _ => {}
+            }
+        }
+    }
+    for f in &mut m.functions {
+        let file = f.origin.file.clone();
+        walk(&mut f.body, &file, &constants, &takes, &mut problems);
+    }
+    for st in &mut m.structs {
+        for me in &mut st.methods {
+            let file = me.function.origin.file.clone();
+            walk(&mut me.function.body, &file, &constants, &takes, &mut problems);
+        }
+    }
+    problems
+}
+
 /// Takes into `m` the functions and globals of `from` (`Blizzard.j`) that
 /// it uses, and what they use (tree-shaking), in `from`'s order: the
 /// globals before `m`'s, the functions after.

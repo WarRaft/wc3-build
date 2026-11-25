@@ -302,7 +302,8 @@ endfunction
         "    a.wcb__set_length(2.0f);\n    h.v.scale(3.0f);\n    if (a.wcb__lt(b) && a.wcb__getindex(2) > 1.0f) {\n        Jass::BJDebugMsg(Jass::I2S(wcb__fi_Op(f, 4)));\n    }\n    a.scale(2.0f);\n    wcb__exec_s__Vec_tick();\n",
         "@h.v = a;",
         "int s__Vec_made = 0;",
-        "Jass::ExecuteFunc(\"s__Vec_onInit__Counted\")",
+        // No ExecuteFunc in AngelScript: called straight.
+        "    s__Vec_onInit__Counted();\n",
         "void wcb__exec_s__Vec_tick() {",
     ] {
         assert!(out.contains(part), "{part}\nnot in:\n{out}");
@@ -310,4 +311,42 @@ endfunction
     // An object's method in a thread of its own: not yet.
     let e = angelscript_vjass("struct V\n    method m takes nothing returns nothing\n    endmethod\nendstruct\nfunction F takes V v returns nothing\n    call v.m.execute()\nendfunction\n").unwrap_err();
     assert!(e.iter().any(|e| e.contains("execute")), "{e:?}");
+}
+
+#[test]
+fn execute_func_called_straight() {
+    let m = module(&[Source {
+        name: "t.j",
+        text: r#"globals
+    constant string PREFIX = "Do"
+    string chosen = "DoA"
+endglobals
+function DoA takes nothing returns nothing
+endfunction
+function DoB takes integer x returns nothing
+endfunction
+function main takes nothing returns nothing
+    call ExecuteFunc("DoA")
+    call ExecuteFunc(PREFIX + "A")
+    call ExecuteFunc(chosen)
+    call ExecuteFunc("DoB")
+    call ExecuteFunc("Nowhere")
+    call ExecuteFunc("StartTimerBJ")
+endfunction
+"#,
+    }])
+    .unwrap();
+    let common = crate::structs::tests::COMMON.to_string();
+    let game = crate::from_jass::signatures(&common).into_iter().chain(crate::from_jass::signatures(BLIZZARD)).collect();
+    let built = build_with(&m, &Options { script: Script::AngelScript, game, common_j: common, blizzard_j: BLIZZARD.into(), ..Default::default() }).unwrap();
+    let out = &built.script;
+    // What's told before the game runs is a call; the rest is left, a problem each.
+    assert!(out.contains("void main() {\n    DoA();\n    DoA();\n    Jass::ExecuteFunc(chosen);\n    Jass::ExecuteFunc(\"DoB\");\n    Jass::ExecuteFunc(\"Nowhere\");\n    Jass::ExecuteFunc(\"StartTimerBJ\");\n}"), "{out}");
+    let lines: Vec<(usize, &str)> = built.problems.iter().map(|p| (p.origin.line, p.message.as_str())).collect();
+    assert_eq!(lines.len(), 4, "{lines:?}");
+    assert_eq!(lines[0].0, 12, "{lines:?}");
+    assert!(lines[0].1.contains("told only as the game runs"), "{lines:?}");
+    assert!(lines[1].1.contains("DoB takes arguments"), "{lines:?}");
+    assert!(lines[2].1.contains("no function Nowhere"), "{lines:?}");
+    assert!(lines[3].1.contains("StartTimerBJ takes arguments"), "{lines:?}");
 }

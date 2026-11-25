@@ -95,6 +95,9 @@ pub struct Built {
     pub script: String,
     /// Why some names weren't shortened, when they were asked to be.
     pub notes: Vec<String>,
+    /// What's wrong with the script made, which is made all the same
+    /// (AngelScript's `ExecuteFunc` of a name that can't be told).
+    pub problems: Vec<Error>,
 }
 
 /// The game's JASS of `m`, or why it can't be made.
@@ -115,7 +118,9 @@ pub fn build_with(m: &Module, options: &Options) -> Result<Built, Vec<Error>> {
         return Err(errors);
     }
     let mut m = m;
+    let mut problems = Vec::new();
     if let Some((_, blizzard)) = &angelscript {
+        problems = crate::angelscript::unroll_execute_func(&mut m, blizzard);
         crate::angelscript::take_used(&mut m, blizzard);
     }
     let mut errors = Vec::new();
@@ -160,7 +165,7 @@ pub fn build_with(m: &Module, options: &Options) -> Result<Built, Vec<Error>> {
             crate::angelscript::print(&m, &options.game, common)
         }
     };
-    Ok(Built { script, notes })
+    Ok(Built { script, notes, problems })
 }
 
 /// `common.j`'s names and `Blizzard.j`'s module, for AngelScript.

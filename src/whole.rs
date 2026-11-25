@@ -79,6 +79,9 @@ pub struct Script {
     pub text: String,
     /// What it says about the build (names left long, and why).
     pub notes: Vec<String>,
+    /// What's wrong with the script, which is made all the same
+    /// ([`crate::jass::Built::problems`]).
+    pub problems: Vec<Error>,
 }
 
 /// The map's whole script, or why it can't be made.
@@ -154,7 +157,7 @@ pub fn script(input: &Input) -> Result<Script, Vec<Error>> {
     let scripts = input.script == crate::jass::Script::AngelScript;
     let (common_j, blizzard_j) = if scripts { (common_j, blizzard_j) } else { Default::default() };
     let built = crate::jass::build_with(&whole, &crate::jass::Options { uglify: input.uglify, game, script: input.script, common_j, blizzard_j })?;
-    Ok(Script { text: built.script, notes: built.notes })
+    Ok(Script { text: built.script, notes: built.notes, problems: built.problems })
 }
 
 #[cfg(test)]

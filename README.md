@@ -122,7 +122,12 @@ Shape isn't built into JASS yet").
   (`SaveInteger(ht, k, 0, s__R__id(x))`) and comes back
   (`cast<S>(s__R__at(LoadInteger(...)))`); `0` where an object goes is
   `null`, `a == b` of objects `a is b`. Instance 0 is no object:
-  `thistype(0).next` is an error (a static field instead). Not yet:
+  `thistype(0).next` is an error (a static field instead).
+  `ExecuteFunc(name)` (AngelScript has none) is a call of the function
+  named when the name is worked out before the game runs (literals, `+`
+  of them, constants of them: `unroll_execute_func`, after lowering, so
+  a `Blizzard.j` function called so is taken in); else it's left and is
+  one of `Built::problems`, which don't stop the script. Not yet:
   `extends array`, `.execute` of an object's method.
 - **`lower`** (the build's stage 4): what vJASS and Zinc add, made into
   JASS, for the JASS output; for AngelScript all of it but structs and
