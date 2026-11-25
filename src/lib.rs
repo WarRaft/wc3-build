@@ -1,6 +1,7 @@
 //! Builds a Warcraft III map's script: every source into one model of the
 //! code ([`ir`]), the game's JASS made of it ([`jass`]). See the README.
 
+pub mod angelscript;
 pub mod audio;
 pub mod from_jass;
 pub mod from_zinc;

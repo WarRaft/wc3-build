@@ -46,6 +46,11 @@ pub struct Options {
     pub game: Vec<Signature>,
     /// The language written ([`Script`]).
     pub script: Script,
+    /// The game's `common.j` and `Blizzard.j` as text, for AngelScript
+    /// ([`crate::angelscript`]): `common.j`'s names are in `Jass::`, and
+    /// what the code uses of `Blizzard.j` is written with it.
+    pub common_j: String,
+    pub blizzard_j: String,
 }
 
 /// The language a build writes the script in (`[build] script=`).
@@ -56,7 +61,7 @@ pub enum Script {
     Jass,
     /// The game's Lua (`war3map.lua`, [`crate::lua`]).
     Lua,
-    /// UjAPI's AngelScript: not written yet.
+    /// UjAPI's AngelScript (`war3map.as`, [`crate::angelscript`]).
     AngelScript,
 }
 
@@ -96,12 +101,19 @@ pub fn build(m: &Module) -> Result<String, Vec<Error>> {
 
 /// [`build`], as `options` say.
 pub fn build_with(m: &Module, options: &Options) -> Result<Built, Vec<Error>> {
+    let angelscript = match options.script {
+        Script::AngelScript => Some(game_scripts(options)?),
+        _ => None,
+    };
     let m = crate::lower::lower_with(m, &options.game)?;
     let errors = m.not_lowered();
     if !errors.is_empty() {
         return Err(errors);
     }
     let mut m = m;
+    if let Some((_, blizzard)) = &angelscript {
+        crate::angelscript::take_used(&mut m, blizzard);
+    }
     let mut errors = Vec::new();
     merge_entries(&mut m);
     let deferred = order_globals(&mut m, &mut errors);
@@ -114,11 +126,16 @@ pub fn build_with(m: &Module, options: &Options) -> Result<Built, Vec<Error>> {
         body.append(&mut main.body);
         main.body = body;
     }
-    let order = sort_functions(&m);
-    let functions: Vec<Function> = order.into_iter().map(|i| m.functions[i].clone()).collect();
-    let (functions, globals) = evaluate_forward_calls(functions);
-    m.globals.extend(globals);
-    m.functions = functions.into_iter().map(hoist_locals).collect();
+    if angelscript.is_some() {
+        // AngelScript calls a function wherever it is: nothing to sort.
+        m.functions = std::mem::take(&mut m.functions).into_iter().map(hoist_locals).collect();
+    } else {
+        let order = sort_functions(&m);
+        let functions: Vec<Function> = order.into_iter().map(|i| m.functions[i].clone()).collect();
+        let (functions, globals) = evaluate_forward_calls(functions);
+        m.globals.extend(globals);
+        m.functions = functions.into_iter().map(hoist_locals).collect();
+    }
     let mut notes = Vec::new();
     if options.uglify {
         notes = crate::uglify::uglify(&mut m).kept;
@@ -126,9 +143,23 @@ pub fn build_with(m: &Module, options: &Options) -> Result<Built, Vec<Error>> {
     let script = match options.script {
         Script::Jass => print(&m),
         Script::Lua => crate::lua::print(&m, &options.game),
-        Script::AngelScript => return Err(vec![Error { origin: Origin::file("the build"), message: "AngelScript (script=as) isn't written yet".into() }]),
+        Script::AngelScript => {
+            let (common, _) = angelscript.as_ref().expect("read above");
+            crate::angelscript::print(&m, &options.game, common)
+        }
     };
     Ok(Built { script, notes })
+}
+
+/// `common.j`'s names and `Blizzard.j`'s module, for AngelScript.
+fn game_scripts(options: &Options) -> Result<(crate::angelscript::Common, Module), Vec<Error>> {
+    use crate::from_jass::{Source, module_as};
+    if options.common_j.is_empty() {
+        return Err(vec![Error { origin: Origin::file("the build"), message: "AngelScript (script=as) needs the game's Scripts\\common.j: its natives are called in Jass::".into() }]);
+    }
+    let common = module_as(&[Source { name: "common.j", text: &options.common_j }], jass_rs::Dialect::Jass)?;
+    let blizzard = if options.blizzard_j.is_empty() { Module::default() } else { module_as(&[Source { name: "Blizzard.j", text: &options.blizzard_j }], jass_rs::Dialect::Jass)? };
+    Ok((crate::angelscript::Common::of(&common), blizzard))
 }
 
 /// Is `f` a `main` or a `config` the build merges?

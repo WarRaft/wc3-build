@@ -2,7 +2,7 @@
 name = "wc3-build"
 version = "0.1.0"
 edition = "2024"
-description = "Builds a Warcraft III map's script: one model of the code (the IR) from every source, and the game's JASS (later AngelScript and Lua) from it"
+description = "Builds a Warcraft III map's script: one model of the code (the IR) from every source, and the game's JASS, Lua and UjAPI's AngelScript from it"
 license = "CC0-1.0"
 
 [lib]
@@ -25,3 +25,5 @@ w3abdhqtu-rs = { path = "../w3abdhqtu-rs" }
 [dev-dependencies]
 # The Lua a build writes, read back.
 lua-rs = { path = "../lua-rs" }
+# The AngelScript a build writes, read back.
+as-rs = { path = "../as-rs" }

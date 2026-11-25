@@ -86,8 +86,28 @@ files or a folder. Before step 1 the module is lowered (`lower`); what
 isn't lowered yet is refused, each item with where it is ("interface
 Shape isn't built into JASS yet").
 
+- **`lua`** (`jass::Options::script` `Lua`): the same tree, after the same
+  steps, written in the game's Lua (see the module's comment).
+- **`angelscript`** (`Script::AngelScript`): UjAPI's AngelScript, as
+  decided with its author: after the same steps but sorting (AngelScript
+  calls a function wherever it is), `common.j`'s natives and globals in
+  `Jass::` (`jass::Options::common_j`), every handle type a type of its
+  own with `nil`, `int`/`float`/`bool`/`string`, `code` UjAPI's funcdef
+  (`code@`, `function F` as `@F`), `'hfoo'` as in JASS, `void main()`
+  and `void config()`. UjAPI ships no `Blizzard.j`: what the code uses
+  of it (`Options::blizzard_j`), and what that uses, is taken in
+  (`take_used`, tree-shaking) and written too. An array is a class of
+  the namespace `WC3` for each type of element used (`WC3::int_array`):
+  AngelScript's `array<T>` has a size, a JASS array has none, so its
+  `get_opIndex`/`set_opIndex` read any index (what's never set, the
+  type's empty value) and grow as it's set; `a[i] = x` reads as in JASS.
+  A string is never null (`null` where one goes is `""`), a variable
+  always has a value, a name that's one of AngelScript's words gets the
+  build's prefix (`wcb__in`). Not yet: structs as classes (they're
+  lowered into arrays, as for JASS).
 - **`lower`** (the build's stage 4): what vJASS and Zinc add, made into
-  JASS, for the JASS output only (AngelScript keeps classes).
+  JASS, for the JASS output and AngelScript's for now (the plan: classes
+  for AngelScript).
   - Libraries in the order of `requires` (one required and not there is
     an error, unless `optional`; so is a cycle). A private name is
     `<scope>__<name>` (a scope in a scope `<outer>_<inner>__<name>`), a

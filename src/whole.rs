@@ -148,8 +148,12 @@ pub fn script(input: &Input) -> Result<Script, Vec<Error>> {
     whole.append(code);
     whole.append(crate::map::end(&map));
     // The game's natives and functions, for hooks of them.
-    let game = ["Scripts\\common.j", "Scripts\\Blizzard.j"].iter().filter_map(|n| text(n)).flat_map(|t| crate::from_jass::signatures(&t)).collect();
-    let built = crate::jass::build_with(&whole, &crate::jass::Options { uglify: input.uglify, game, script: input.script })?;
+    let (common_j, blizzard_j) = (text("Scripts\\common.j").unwrap_or_default(), text("Scripts\\Blizzard.j").unwrap_or_default());
+    let game = [&common_j, &blizzard_j].iter().flat_map(|t| crate::from_jass::signatures(t)).collect();
+    // AngelScript's: common.j's names in Jass::, what's used of Blizzard.j.
+    let scripts = input.script == crate::jass::Script::AngelScript;
+    let (common_j, blizzard_j) = if scripts { (common_j, blizzard_j) } else { Default::default() };
+    let built = crate::jass::build_with(&whole, &crate::jass::Options { uglify: input.uglify, game, script: input.script, common_j, blizzard_j })?;
     Ok(Script { text: built.script, notes: built.notes })
 }
 

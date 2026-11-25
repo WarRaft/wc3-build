@@ -42,15 +42,15 @@ end
 
 /// What a name's type is: globals', a function's locals' and parameters',
 /// what functions give back.
-struct Types<'a> {
-    globals: HashMap<&'a str, &'a str>,
-    returns: HashMap<&'a str, Option<&'a str>>,
-    locals: HashMap<String, String>,
+pub(crate) struct Types<'a> {
+    pub(crate) globals: HashMap<&'a str, &'a str>,
+    pub(crate) returns: HashMap<&'a str, Option<&'a str>>,
+    pub(crate) locals: HashMap<String, String>,
 }
 
 impl Types<'_> {
     /// The type of `e` when it can be told.
-    fn of(&self, e: &Expr) -> Option<String> {
+    pub(crate) fn of(&self, e: &Expr) -> Option<String> {
         match e {
             Expr::Literal(t) => literal_type(t).map(String::from),
             Expr::Var(n) | Expr::Index(n, _) => self.locals.get(n).cloned().or_else(|| self.globals.get(n.as_str()).map(|t| t.to_string())),
@@ -79,7 +79,7 @@ impl Types<'_> {
 }
 
 /// A literal's type, by how it's written.
-fn literal_type(t: &str) -> Option<&'static str> {
+pub(crate) fn literal_type(t: &str) -> Option<&'static str> {
     match t {
         "true" | "false" => Some("boolean"),
         "null" => None,
@@ -131,7 +131,7 @@ pub fn print(m: &Module, game: &[Signature]) -> String {
     out
 }
 
-fn locals(body: &[Stmt], out: &mut HashMap<String, String>) {
+pub(crate) fn locals(body: &[Stmt], out: &mut HashMap<String, String>) {
     for s in body {
         match s {
             Stmt::Local { ty, name, .. } => {
