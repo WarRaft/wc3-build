@@ -294,6 +294,10 @@ pub fn lower_for(m: &Module, game: &[Signature], classes: bool) -> Result<Module
     for f in m.functions.iter_mut().filter(|f| f.sig.name == "main") {
         f.body.retain(|s| !matches!(s, Stmt::Call { call, .. } if call.name.starts_with("InitTrig_") && call.args.is_empty() && !defined.contains(&call.name)));
     }
+    // What `//! loaddata` made: after the structs and libraries are set up.
+    let mut loaded: Vec<&Function> = m.functions.iter().filter(|f| f.sig.name.starts_with(crate::preprocess::LOADDATA)).collect();
+    loaded.sort_by_key(|f| f.sig.name[crate::preprocess::LOADDATA.len()..].parse::<usize>().unwrap_or(0));
+    init.extend(loaded.into_iter().map(|f| Stmt::call(f.sig.name.clone(), Vec::new())));
     let injected = inject(&mut m, &mut errors);
     // `//! dovjassinit`: vJASS's initialization there (nothing to put, the
     // call gone).

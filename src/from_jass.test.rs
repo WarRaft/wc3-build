@@ -65,9 +65,10 @@ fn jasshelpers_preprocessor_run_first() {
     // `//! inject main`: a function of its own, line for line.
     let m = module(&[Source { name: "t.j", text: "// @dialect vjass\n//! inject main\n//! dovjassinit\n//! endinject\n" }]).unwrap();
     assert_eq!((m.functions[0].sig.name.as_str(), m.functions[0].origin.line), ("wcb__inject_main", 2));
-    // What isn't run yet: an error each.
-    let text = "// @dialect vjass\n//! loaddata \"x.slk\"\n//! external ObjectMerger\n";
-    let errors = module(&[Source { name: "t.j", text }]).unwrap_err();
-    let found: Vec<(usize, &str)> = errors.iter().map(|e| (e.origin.line, e.message.as_str())).collect();
-    assert_eq!(found, [(2, "JassHelper's `//! loaddata` isn't read yet"), (3, "JassHelper's `//! external` isn't read yet")]);
+    // A table that isn't there: an error of the preprocessor's.
+    let errors = module(&[Source { name: "t.j", text: "// @dialect vjass\n//! loaddata \"x.slk\"\n" }]).unwrap_err();
+    assert_eq!((errors[0].origin.line, errors[0].message.as_str()), (2, "`//! loaddata`: no file \"x.slk\""));
+    // What isn't run: an error each.
+    let errors = module(&[Source { name: "t.j", text: "// @dialect vjass\n\n//! external ObjectMerger\n" }]).unwrap_err();
+    assert_eq!((errors[0].origin.line, errors[0].message.as_str()), (3, "JassHelper's `//! external` isn't read yet"));
 }

@@ -1024,3 +1024,33 @@ endfunction
     let e = module(&[Source { name: "t.j", text: "// @dialect vjass\n//! dovjassinit\n//! inject main\n" }]).unwrap_err();
     assert!(e.iter().any(|m| m.message.contains("for an `//! inject main` only")) && e.iter().any(|m| m.message.contains("has no `//! endinject`")), "{e:?}");
 }
+
+#[test]
+fn loaddata_sets_structs_from_a_table() {
+    let slk = "ID;PWXL;N;E\nB;Y3;X3;D0\nC;Y1;X1;K\"stname\"\nC;X2;K\"is\"\nC;X3;K\"just\"\nC;Y2;X1;K1\nC;X2;K3\nC;X3;K\"four\"\nC;Y3;X1;K7\nC;X2;K9\nE\n";
+    let code = r#"// @dialect vjass
+struct stname
+    integer is
+    string just
+    static stname array values
+    static method getFromKey takes integer i returns thistype
+        if (stname.values[i] == 0) then
+            set values[i] = stname.create()
+        endif
+        return stname.values[i]
+    endmethod
+endstruct
+//! loaddata "data.slk"
+function main takes nothing returns nothing
+    call InitBlizzard()
+endfunction
+"#;
+    let import = |_: &str, path: &str| (path == "data.slk").then(|| (path.to_string(), slk.to_string()));
+    let m = crate::from_jass::module_with(&[(Source { name: "t.j", text: code }, jass_rs::Dialect::VJass)], &import).unwrap_or_else(|e| panic!("{e:?}"));
+    let out = crate::jass::build(&m).unwrap_or_else(|e| panic!("{e:?}"));
+    as_the_games(&out);
+    let out: String = out.lines().map(str::trim).collect::<Vec<_>>().join("\n");
+    assert!(out.contains("function wcb__loaddata_0 takes nothing returns nothing\nlocal integer wcb__loaddata_s\nset wcb__loaddata_s = s__stname_getFromKey(1)\nset s__stname_is[wcb__loaddata_s] = 3\nset s__stname_just[wcb__loaddata_s] = \"four\"\nset wcb__loaddata_s = s__stname_getFromKey(7)\nset s__stname_is[wcb__loaddata_s] = 9\nendfunction"), "{out}");
+    // Run after vJASS's initialization.
+    assert!(out.contains("call InitBlizzard()\ncall wcb__loaddata_0()"), "{out}");
+}

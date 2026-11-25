@@ -130,6 +130,7 @@ pub fn expand(files: &[(&str, &str)], import: &Import) -> Result<Vec<Expanded>, 
 
     // The macros, and each file without them (and without novjass).
     let mut macros: HashMap<String, Macro> = HashMap::new();
+    let mut loaded = 0;
     let mut kept: Vec<Vec<(String, usize)>> = Vec::new();
     for (name, text, _) in &all {
         let mut own = Vec::new();
@@ -219,6 +220,27 @@ pub fn expand(files: &[(&str, &str)], import: &Import) -> Result<Vec<Expanded>, 
                     Some((what, _)) if what == "main" => own.push((format!("call {DOVJASSINIT}()"), i + 1)),
                     _ => errors.push(error(name, i + 1, "`//! dovjassinit` is for an `//! inject main` only".into())),
                 },
+                // `//! loaddata "path.slk"`: the table made a function setting
+                // its structs (`wcb__loaddata_<n>`), all on this line, which
+                // lowering runs after vJASS's initialization.
+                "loaddata" => {
+                    let rest = d[word.len()..].trim();
+                    let Some(path) = rest.strip_prefix('"').and_then(|p| p.strip_suffix('"')) else {
+                        errors.push(error(name, i + 1, format!("`//! loaddata` needs a quoted path: {rest}")));
+                        continue;
+                    };
+                    let Some((_, slk)) = import(name, path) else {
+                        errors.push(error(name, i + 1, format!("`//! loaddata`: no file \"{path}\"")));
+                        continue;
+                    };
+                    match load_data(&slk, loaded) {
+                        Ok(lines) => {
+                            loaded += 1;
+                            own.extend(lines.into_iter().map(|l| (l, i + 1)));
+                        }
+                        Err(e) => errors.push(error(name, i + 1, format!("`//! loaddata \"{path}\"`: {e}"))),
+                    }
+                }
                 // Read already.
                 "import" => {}
                 _ => own.push((line.to_string(), i + 1)),
@@ -241,6 +263,50 @@ pub fn expand(files: &[(&str, &str)], import: &Import) -> Result<Vec<Expanded>, 
         out.push(Expanded { name: name.clone(), text, lines, imported_by: *by });
     }
     if errors.is_empty() { Ok(out) } else { Err(errors) }
+}
+
+/// What a `//! loaddata` is made: `wcb__loaddata_<n>`, run after vJASS's
+/// initialization.
+pub const LOADDATA: &str = "wcb__loaddata_";
+
+/// The function JassHelper makes of an SLK table (`//! loaddata`, its
+/// `n`th): the struct named at (1, 1), the fields its first row names, and
+/// for each row after, `set s = S.getFromKey(<key>)` (the key in its first
+/// column) and `set s.<field> = <value>` for each value it has. Numbers
+/// and `true`/`false` as written, text as a JASS string.
+fn load_data(slk: &str, n: usize) -> Result<Vec<String>, String> {
+    let doc = slk_rs::parse(slk);
+    let table = slk_rs::Table::new(&doc);
+    let literal = |row: u32, col: u32| -> Option<String> {
+        match &table.get(row, col)?.value {
+            slk_rs::ast::Value::Number(v) => Some(v.clone()),
+            slk_rs::ast::Value::Bool(b) => Some(b.to_string()),
+            slk_rs::ast::Value::Str(t) | slk_rs::ast::Value::Text(t) => Some(format!("\"{}\"", t.replace('\\', "\\\\").replace('"', "\\\""))),
+            _ => None,
+        }
+    };
+    let ident = |t: &str| !t.is_empty() && t.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    let st = table.text(1, 1);
+    if !ident(&st) {
+        return Err(format!("its cell (1, 1) names no struct: {st:?}"));
+    }
+    let fields: Vec<(u32, String)> = (2..=table.cols()).map(|c| (c, table.text(1, c))).filter(|(_, f)| !f.is_empty()).collect();
+    if let Some((c, f)) = fields.iter().find(|(_, f)| !ident(f)) {
+        return Err(format!("its column {c} names no field: {f:?}"));
+    }
+    let s = format!("{LOADDATA}s");
+    let mut out = vec![format!("function {LOADDATA}{n} takes nothing returns nothing"), format!("local {st} {s}")];
+    for row in 2..=table.rows() {
+        let Some(key) = literal(row, 1) else { continue };
+        out.push(format!("set {s} = {st}.getFromKey({key})"));
+        for (col, field) in &fields {
+            if let Some(v) = literal(row, *col) {
+                out.push(format!("set {s}.{field} = {v}"));
+            }
+        }
+    }
+    out.push("endfunction".into());
+    Ok(out)
 }
 
 /// `line` (the file's `at`), its `runtextmacro` run, into `text`.

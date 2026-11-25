@@ -380,7 +380,20 @@ static method (`f = S.m`) or an object's (`S.m`, taking its instance
 first; in AngelScript `wcb__p_S_m` taking its number), `x.m.exists`
 (known from the declarations, else by the instance's type). A class
 named as a word of AngelScript's (`try`) is written with the build's
-prefix. What's left is in `wc3-rs`'s README, Open tasks.
+prefix. Then the big ones: more index space than one of the game's
+arrays (sized arrays, `struct X[10000]`, `interface A[20000]`,
+`extends array [20000]`, Zinc's: in JASS split into arrays of 8191 behind
+`wcb__ag_a`/`wcb__as_a`, `jass::split_big_arrays`), vJASS's 2D arrays
+(`a[10][20]`, `a[i][j]`, `.width`/`.height`), dynamic arrays (`type T
+extends E array [size(, space)]`: storage `s__T`, a free list,
+`T.create`/`destroy`, `r[i]`, `T.size`, `T(x)`, `integer(x)`), Zinc's
+function types, anonymous methods, `struct[N] X`, `struct X[]` (an array
+struct), interface defaults `= value`; a struct's members written bare
+in its methods; `//! inject main/config` with `//! dovjassinit` (the
+injected `main` the map's, World Editor's replaced, the other `main`s
+`InitCustomTriggers`), `//! loaddata` (an SLK made `wcb__loaddata_<n>`,
+run after vJASS's initialization). What's left is in `wc3-rs`'s
+README, Open tasks.
 
 `tests/real.rs` (ignored) builds real scripts: `JASS_GAME` (folders with
 the game's `common.j` and `Blizzard.j`) and `JASS_FILES` (each built
