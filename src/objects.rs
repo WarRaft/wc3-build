@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use parser_rs::Rawcode;
 use w3abdhqtu_rs::{Kind, ObjectData, Value};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Objects {
     buildings: HashSet<Rawcode>,
     items: HashSet<Rawcode>,
