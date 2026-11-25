@@ -221,6 +221,24 @@ impl Types {
 /// of an object runs `wcb__x_S_m(x, ...)` (made here: it calls `x.m(...)`)
 /// as any function's `.execute`; `x.m.evaluate(...)` is `x.m(...)`.
 pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec<Error>) -> Lowered {
+    // A global's initial value and a member's default are set before any
+    // code runs, so they can't use a struct (`pair.create()`): a constant,
+    // or set it in an initializer.
+    let uses_struct = |e: &Expr| {
+        let mut found = false;
+        each_expr(&[Stmt::Return { value: Some(e.clone()), line: 0 }], &mut |x| found |= matches!(x, Expr::Member(..) | Expr::Method(_) | Expr::Element(..)));
+        found
+    };
+    for g in &m.globals {
+        if g.init.as_ref().is_some_and(uses_struct) {
+            errors.push(Error { origin: g.origin.clone(), message: format!("the global {}'s initial value uses a struct (a.b, S.create() ...): globals are set before any code runs, so give it a constant and set it in an initializer", g.name) });
+        }
+    }
+    for s in &m.structs {
+        for f in s.fields.iter().filter(|f| f.init.as_ref().is_some_and(uses_struct)) {
+            errors.push(Error { origin: s.origin.clone(), message: format!("{}'s member {}'s default value uses a struct (a.b, S.create() ...): a default is a constant; set it in create instead", s.name, f.name) });
+        }
+    }
     let structs = std::mem::take(&mut m.structs);
     let interfaces = std::mem::take(&mut m.interfaces);
     let mut infos: HashMap<String, Info> = HashMap::new();
@@ -327,6 +345,7 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
             g.constant = f.constant;
             if f.is_static {
                 g.array = f.array.is_some();
+                g.size = f.array.clone().flatten();
                 g.init = f.init.clone();
             } else {
                 g.array = true;
@@ -386,6 +405,7 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
     };
     let globals: HashMap<String, String> = m.globals.iter().map(|g| (g.name.clone(), g.ty.clone())).collect();
     let global_arrays: HashSet<String> = m.globals.iter().filter(|g| g.array).map(|g| g.name.clone()).collect();
+    let sizes: HashMap<String, Expr> = m.globals.iter().filter_map(|g| Some((g.name.clone(), g.size.clone()?))).collect();
     let dispatched: RefCell<BTreeSet<(String, String)>> = RefCell::new(BTreeSet::new());
     let executed: RefCell<BTreeSet<(String, String)>> = RefCell::new(BTreeSet::new());
     let pointers = Pointers::default();
@@ -406,6 +426,7 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
         local_types(&mut f.body, &this_type, &mut locals, &mut arrays);
         let returns = f.sig.returns.clone();
         let cx = Cx {
+            sizes: &sizes,
             executed: &executed,
             classes,
             takes: &takes,
@@ -445,6 +466,14 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
             let st = structs.iter_mut().find(|s| s.name == owner).expect("its struct");
             if let Some(me) = st.methods.iter_mut().find(|me| !me.is_static && class_method(&me.function.sig.name, &owner) == name) {
                 me.function = f;
+            }
+        }
+        // A child allocated through a parent's own `create`: that `create`
+        // made to make the child (AngelScript makes an object of its class).
+        let names: Vec<String> = structs.iter().map(|s| s.name.clone()).collect();
+        for c in &names {
+            if let Some((p, _)) = parent_create(&types, &structs, c) {
+                via_create(m, &types, &structs, c, &p.name.clone(), &format!("s__{c}__allocate"));
             }
         }
         for st in &mut structs {
@@ -595,6 +624,84 @@ fn free_list(m: &mut Module, root: &str, _name: &str, origin: Option<Origin>) {
 
 /// `s__S__allocate` and `s__S_deallocate` (and `s__S_destroy` for a
 /// struct alone), on its family's free list.
+/// The nearest parent of `s` (not `s`) with a `create` of its own, and
+/// that `create`.
+fn parent_create<'a>(types: &'a Types, structs: &[Struct], s: &str) -> Option<(&'a Info, &'a MethodInfo)> {
+    types.chain(s).into_iter().skip(1).find_map(|i| {
+        let own = structs.iter().any(|x| x.name == i.name && x.methods.iter().any(|me| me.is_static && me.function.sig.name == "create"));
+        own.then(|| i.methods.get("create").map(|x| (i, x))).flatten()
+    })
+}
+
+/// Classes': the function `name`, `p`'s own `create` made to make a `c`
+/// (a child of `p`): its allocation `s__c__new()` (the printer's, an
+/// object of `c`), or, when `p` is itself allocated through a parent's
+/// `create`, that one made so too.
+fn via_create(m: &mut Module, types: &Types, structs: &[Struct], c: &str, p: &str, name: &str) {
+    let Some(mut f) = m.functions.iter().find(|f| f.sig.name == format!("s__{p}_create")).cloned() else { return };
+    let alloc = format!("s__{p}__allocate");
+    let to = match parent_create(types, structs, p) {
+        Some((gp, _)) => {
+            let via = format!("s__{c}__via_{}", gp.name);
+            via_create(m, types, structs, c, &gp.name.clone(), &via);
+            via
+        }
+        None => format!("s__{c}__new"),
+    };
+    let mut to_map = HashMap::new();
+    to_map.insert(alloc, to);
+    retarget_calls(&mut f.body, &to_map);
+    f.sig.name = name.to_string();
+    m.functions.push(f);
+}
+
+/// Calls of the functions `to` names, made of the ones it names for them.
+fn retarget_calls(body: &mut [Stmt], to: &HashMap<String, String>) {
+    fn expr(e: &mut Expr, to: &HashMap<String, String>) {
+        if let Expr::Call(c) = e
+            && let Some(t) = to.get(&c.name)
+        {
+            c.name = t.clone();
+        }
+        for x in e.children_mut() {
+            expr(x, to);
+        }
+    }
+    for s in body {
+        match s {
+            Stmt::Local { init, .. } => init.iter_mut().for_each(|e| expr(e, to)),
+            Stmt::Set { index, value, .. } => {
+                index.iter_mut().for_each(|e| expr(e, to));
+                expr(value, to);
+            }
+            Stmt::Call { call, .. } => {
+                if let Some(t) = to.get(&call.name) {
+                    call.name = t.clone();
+                }
+                call.args.iter_mut().for_each(|a| expr(a, to));
+            }
+            Stmt::If { branches, otherwise, .. } => {
+                for (c, b) in branches.iter_mut() {
+                    expr(c, to);
+                    retarget_calls(b, to);
+                }
+                if let Some(b) = otherwise {
+                    retarget_calls(b, to);
+                }
+            }
+            Stmt::Loop { body, .. } => retarget_calls(body, to),
+            Stmt::ExitWhen { cond, .. } => expr(cond, to),
+            Stmt::Return { value, .. } => value.iter_mut().for_each(|e| expr(e, to)),
+            Stmt::Debug { stmt, .. } => retarget_calls(std::slice::from_mut(&mut **stmt), to),
+            other => {
+                let (es, bs) = other.oop_parts_mut();
+                es.into_iter().for_each(|e| expr(e, to));
+                bs.into_iter().for_each(|b| retarget_calls(b, to));
+            }
+        }
+    }
+}
+
 fn allocator(m: &mut Module, types: &Types, structs: &[Struct], s: &Struct) {
     let info = &types.infos[&s.name];
     let root = types.root(&s.name).to_string();
@@ -610,6 +717,37 @@ fn allocator(m: &mut Module, types: &Types, structs: &[Struct], s: &Struct) {
         let mut t = Global::new(types.type_global(&root), "integer", None, s.origin.clone());
         t.array = true;
         m.globals.push(t);
+    }
+    // A parent with a `create` of its own: allocating is that (as
+    // JassHelper does), taking what it takes; the instance made this
+    // struct's after.
+    if let Some((p, create)) = parent_create(types, structs, &s.name) {
+        let params = create.params.clone();
+        let mut alloc = vec![
+            Stmt::local("integer", "this", Some(Expr::call(p.method("create"), params.iter().map(|x| Expr::var(x.name.clone())).collect()))),
+            Stmt::If { branches: vec![(Expr::binary(this(), BinOp::Eq, Expr::int(0)), vec![Stmt::Return { value: Some(Expr::int(0)), line: 0 }])], otherwise: None, line: 0 },
+        ];
+        if several {
+            alloc.push(Stmt::set_at(types.type_global(&root), this(), Expr::int(info.typeid)));
+        }
+        // The fields with a value of the structs below the parent.
+        for i in types.chain(&s.name).into_iter().take_while(|i| i.name != p.name).collect::<Vec<_>>().into_iter().rev() {
+            let Some(x) = structs.iter().find(|x| x.name == i.name) else { continue };
+            for f in x.fields.iter().filter(|f| !f.is_static && f.array.is_none()) {
+                if let Some(init) = &f.init {
+                    alloc.push(Stmt::set_at(i.field(&f.name), this(), init.clone()));
+                }
+            }
+        }
+        alloc.push(Stmt::Return { value: Some(this()), line: 0 });
+        let mut a = Function::new(info.method("_allocate"), alloc, s.origin.clone());
+        a.sig.params = params;
+        a.sig.returns = Some("integer".into());
+        m.functions.push(a);
+        let mut d = Function::new(info.method("deallocate"), taken(&root, give_back(&root)), s.origin.clone());
+        d.sig.params.push(Param { ty: "integer".into(), name: "this".into() });
+        m.functions.push(d);
+        return;
     }
     let (free, last, next) = (format!("si__{root}_F"), format!("si__{root}_I"), format!("si__{root}_V"));
     let size = structs.iter().find(|x| x.name == root).and_then(|x| x.size.as_ref()).and_then(literal_int).unwrap_or(DEFAULT_SIZE);
@@ -901,6 +1039,8 @@ struct Cx<'a> {
     takes: &'a HashMap<String, Vec<String>>,
     /// What the function gives back.
     returns: Option<&'a str>,
+    /// The sized global arrays' sizes (`a.size`).
+    sizes: &'a HashMap<String, Expr>,
     /// Classes': the objects' methods run by `.execute` (struct, method).
     executed: &'a RefCell<BTreeSet<(String, String)>>,
     types: &'a Types,
@@ -1015,6 +1155,42 @@ impl Cx<'_> {
                 let info = self.struct_named(o)?;
                 let (owner, x) = self.types.method(&info.name, m)?;
                 (!self.is_class(&owner.name) || x.is_static).then(|| owner.method(m))
+            }
+            _ => None,
+        }
+    }
+
+    /// The size of the sized array `e` names: a global (`a`), a member
+    /// (`x.a`, `S.a`); `None` when it names none.
+    fn size_of(&self, e: &Expr) -> Option<Expr> {
+        match e {
+            Expr::Var(n) if !self.locals.contains_key(n) => self.sizes.get(n).cloned(),
+            Expr::Member(o, f) => {
+                let t = match self.struct_named(o) {
+                    Some(info) => info.name.clone(),
+                    None => self.type_of_expr(o)?,
+                };
+                let (owner, (_, is_static, k, array)) = self.types.field(&t, f)?;
+                if !*array {
+                    return None;
+                }
+                if *is_static { self.sizes.get(&owner.field(f)).cloned() } else { k.map(Expr::int) }
+            }
+            _ => None,
+        }
+    }
+
+    /// The type of `e`, when it's a name (a variable, `this`) or a member
+    /// of one, without lowering it.
+    fn type_of_expr(&self, e: &Expr) -> Option<String> {
+        match e {
+            Expr::Var(n) => self.type_of_var(n),
+            Expr::Member(o, f) => {
+                let t = match self.struct_named(o) {
+                    Some(info) => info.name.clone(),
+                    None => self.type_of_expr(o)?,
+                };
+                self.types.field(&t, f).map(|(_, x)| x.0.clone())
             }
             _ => None,
         }
@@ -1348,6 +1524,8 @@ impl Cx<'_> {
                 let f = self.function_name(&object).expect("checked");
                 (Expr::string(&f), Some("string".into()))
             }
+            // `a.size` of a sized array: a global's, a member's.
+            Expr::Member(object, name) if name == "size" && self.size_of(&object).is_some() => (self.size_of(&object).expect("checked"), Some("integer".into())),
             // An object's method has no function to name (AngelScript's).
             Expr::Member(object, name) if name == "name" && self.object_method(&object).is_some() => {
                 let (owner, m) = self.object_method(&object).expect("checked");
@@ -1535,6 +1713,17 @@ impl Cx<'_> {
                 }
             };
         }
+        // `S.destroy(x)`, `S.deallocate(x)`: `x.destroy()`, unless S has a
+        // static method so named.
+        if let Some(info) = self.struct_named(&object)
+            && matches!(name.as_str(), "destroy" | "deallocate")
+            && args.len() == 1
+            && self.types.method(&info.name, &name).is_none_or(|(_, x)| !x.is_static)
+        {
+            let t = info.name.clone();
+            let o = self.coerce(args.remove(0), have[0].as_deref(), Some(&t));
+            return self.instance_method(o, t, name, Vec::new(), line, errors);
+        }
         // A struct's own: static.
         if let Some(info) = self.struct_named(&object) {
             let f = match name.as_str() {
@@ -1542,7 +1731,18 @@ impl Cx<'_> {
                     self.error(errors, line, no_allocation(&info.name, &name));
                     return (Expr::lit("0"), None);
                 }
-                "create" if self.types.method(&info.name, "create").is_none() && !info.array && !info.interface => info.method("_allocate"),
+                // Through a parent's own `create`: in AngelScript an object's
+                // class is fixed when it's made, and that makes a parent.
+                // AngelScript: `s__S__allocate`, the parent's `create` made to
+                // make an S (`via_create`), cast to S.
+                "allocate" | "create" if self.is_class(&info.name) && !info.methods.contains_key("create") && self.types.chain(&info.name).into_iter().skip(1).any(|i| i.methods.get("create").is_some_and(|x| x.is_static && !x.abstract_)) => {
+                    let want: Option<Vec<String>> = self.types.method(&info.name, "create").map(|(_, x)| x.params.iter().map(|p| p.ty.clone()).collect());
+                    let args = self.coerce_args(args, &have, want.as_ref());
+                    return (cast(&info.name, call(info.method("_allocate"), args)), Some(info.name.clone()));
+                }
+                // A child without a `create` of its own: its `allocate`, which
+                // goes through a parent's own `create`, if it has one.
+                "create" if !info.methods.contains_key("create") && !info.array && !info.interface => info.method("_allocate"),
                 "allocate" if !info.array && !info.interface => info.method("_allocate"),
                 _ => match self.types.method(&info.name, &name) {
                     Some((owner, x)) if x.is_static => owner.method(&name),
@@ -1552,7 +1752,12 @@ impl Cx<'_> {
                     }
                 },
             };
-            let t = self.types.method(&info.name, &name).and_then(|(_, x)| x.returns.clone()).or_else(|| matches!(name.as_str(), "create" | "allocate").then(|| info.name.clone()));
+            // `create`, `allocate` not its own: an instance of it.
+            let t = if matches!(name.as_str(), "create" | "allocate") && !info.methods.contains_key(&name) {
+                Some(info.name.clone())
+            } else {
+                self.types.method(&info.name, &name).and_then(|(_, x)| x.returns.clone())
+            };
             let want: Option<Vec<String>> = self.types.method(&info.name, &name).map(|(_, x)| x.params.iter().map(|p| p.ty.clone()).collect());
             let args = self.coerce_args(args, &have, want.as_ref());
             return (call(f, args), t);

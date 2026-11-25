@@ -69,6 +69,17 @@ pub fn lower_for(m: &Module, game: &[Signature], classes: bool) -> Result<Module
                 Access::Public => format!("{s}_{name}"),
                 Access::Private => format!("{}__{name}", scopes.path(s)),
             };
+            // A nested scope's public one, in the scopes around it, by
+            // the path from there (`Inner_name` in `Outer`).
+            if owner.access == Access::Public {
+                let mut outer = scopes.parent.get(s).cloned().flatten();
+                while let Some(o) = outer {
+                    if let Some(rel) = s.strip_prefix(&format!("{o}_")) {
+                        declared.insert((o.clone(), format!("{rel}_{name}")), to.clone());
+                    }
+                    outer = scopes.parent.get(&o).cloned().flatten();
+                }
+            }
             declared.insert((s.clone(), name.to_string()), to);
         }
     };
@@ -442,16 +453,10 @@ impl Scopes {
         Scopes { parent: m.libraries.iter().map(|l| (l.name.clone(), l.parent.clone())).collect() }
     }
 
-    /// `Outer_Inner` for a scope in a scope.
+    /// `Outer_Inner` for a scope in a scope: its name, which is its path
+    /// already (`from_jass`).
     fn path(&self, scope: &str) -> String {
-        let mut names = vec![scope.to_string()];
-        let mut s = self.parent.get(scope).cloned().flatten();
-        while let Some(p) = s {
-            s = self.parent.get(&p).cloned().flatten();
-            names.push(p);
-        }
-        names.reverse();
-        names.join("_")
+        scope.to_string()
     }
 }
 

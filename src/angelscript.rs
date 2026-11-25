@@ -797,7 +797,11 @@ impl Printer<'_> {
         }
         for st in &m.structs {
             let r = self.root_of(&st.name);
-            let _ = writeln!(out, "\n{0}@ s__{0}__allocate() {{\n    {0}@ o = {0}();\n    s__{r}__add(o);\n    return o;\n}}", st.name);
+            // Allocated through a parent's `create` (`s__S__allocate` made
+            // of it): the object itself is `s__S__new`.
+            let via = m.functions.iter().any(|f| f.sig.name == format!("s__{}__allocate", st.name));
+            let name = if via { "new" } else { "allocate" };
+            let _ = writeln!(out, "\n{0}@ s__{0}__{name}() {{\n    {0}@ o = {0}();\n    s__{r}__add(o);\n    return o;\n}}", st.name);
         }
         out
     }

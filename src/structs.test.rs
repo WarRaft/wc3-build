@@ -621,3 +621,108 @@ endfunction
     // A `create` of its own is the struct's.
     build(&[("t.j", "// @dialect vjass\nstruct P extends array\n    integer a\n    static method create takes integer i returns thistype\n        set thistype(i).a = 1\n        return i\n    endmethod\nendstruct\nfunction F takes nothing returns nothing\n    local P p = P.create(3)\nendfunction\n")]).unwrap();
 }
+
+#[test]
+fn a_childs_allocate_is_its_parents_create() {
+    let out = build(&[(
+        "t.j",
+        r#"// @dialect vjass
+struct A
+    integer x
+    static method create takes integer k returns A
+        local A s = A.allocate()
+        set s.x = k
+        return s
+    endmethod
+endstruct
+struct B extends A
+    integer y = 7
+    static method create takes nothing returns B
+        return B.allocate(445)
+    endmethod
+endstruct
+struct C extends B
+    static method create takes nothing returns C
+        local C s = C.allocate()
+        set s.x = s.x * s.x
+        return s
+    endmethod
+endstruct
+struct D extends A
+endstruct
+function F takes nothing returns nothing
+    local D d = D.create(3)
+endfunction
+"#,
+    )])
+    .unwrap();
+    // B.allocate takes what A.create does; the instance a B after, with B's defaults.
+    assert!(out.contains("function s__B__allocate takes integer k returns integer\nlocal integer this = s__A_create(k)\nif this == 0 then\nreturn 0\nendif\nset si__A_type[this] = 2\nset s__B_y[this] = 7\nreturn this\nendfunction"), "{out}");
+    // C.allocate takes what B.create does (nothing): B's create, then a C.
+    assert!(out.contains("function s__C__allocate takes nothing returns integer\nlocal integer this = s__B_create()\n"), "{out}");
+    assert!(out.contains("set si__A_type[this] = 3\n"), "{out}");
+    // D has no create of its own: D.create is its allocate, through A.create.
+    assert!(out.contains("set d = s__D__allocate(3)") || out.contains("local integer d = s__D__allocate(3)"), "{out}");
+}
+
+#[test]
+fn the_manuals_struct_usage() {
+    let out = build(&[(
+        "t.j",
+        r#"// @dialect vjass
+globals
+    integer array myArray[500]
+endglobals
+struct stack
+    private integer array V[100]
+    private integer N = 0
+    static string array names[3]
+    method full takes nothing returns boolean
+        return .N == .V.size
+    endmethod
+endstruct
+library nestedtest
+    scope B
+        globals
+            public integer N = 5
+        endglobals
+        public function display takes nothing returns nothing
+        endfunction
+    endscope
+    function nestedDoTest takes nothing returns nothing
+        call B_display()
+    endfunction
+endlibrary
+scope X
+    scope B
+        function DoSomething takes nothing returns nothing
+        endfunction
+    endscope
+endscope
+function F takes nothing returns nothing
+    local stack s = stack.create()
+    call BJDebugMsg(I2S(myArray.size + stack.names.size))
+    call stack.destroy(s)
+    set nestedtest_B_N = -4
+    call nestedtest_B_display()
+endfunction
+"#,
+    )])
+    .unwrap();
+    // `.size`: a global's, a member's, a static member's.
+    assert!(out.contains("return s__stack_N[this] == 100"), "{out}");
+    assert!(out.contains("call BJDebugMsg(I2S(500 + 3))"), "{out}");
+    // `S.destroy(x)` is `x.destroy()`.
+    assert!(out.contains("call s__stack_destroy(s)"), "{out}");
+    // A nested scope's public names: Outer_Inner_name, Inner_name in Outer.
+    assert!(out.contains("function nestedtest_B_display takes nothing returns nothing"), "{out}");
+    assert!(out.contains("call nestedtest_B_display()\nendfunction\nfunction nestedtest_B_display") || out.matches("call nestedtest_B_display()").count() == 2, "{out}");
+    assert!(out.contains("set nestedtest_B_N = -4"), "{out}");
+    // Two scopes B in different parents are two.
+    assert!(out.contains("function DoSomething"), "{out}");
+
+    // A global's initial value can't use a struct.
+    let e = build(&[("t.j", "// @dialect vjass\nstruct pair\nendstruct\nglobals\n    pair a = 0\n    pair b = pair.create()\nendglobals\n")]).unwrap_err();
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert!(e[0].contains("the global b's initial value uses a struct"), "{e:?}");
+}

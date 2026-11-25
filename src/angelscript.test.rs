@@ -205,7 +205,7 @@ function Use takes nothing returns nothing
     local Node m
     local Shape s = Square.create()
     local real a = s.area()
-    set n.next = Leaf.allocate()
+    set n.next = Leaf.allocate(6)
     call SaveInteger(ht, 0, 0, n)
     set m = Node(LoadInteger(ht, 0, 0))
     if m == n and m.next != 0 then
@@ -227,11 +227,14 @@ endfunction
         "int s__Node_count = 0;",
         "Node@ s__Node_create(int v) {\n    Node@ c = s__Node__allocate();\n    c.value = v;\n    @c.next = null;\n    s__Node_count = s__Node_count + 1;\n    c.marks[2] = v;\n    return c;\n}",
         "Node@ s__Node__allocate() {\n    Node@ o = Node();\n    s__Node__add(o);\n    return o;\n}",
-        "Leaf@ s__Leaf__allocate() {\n    Leaf@ o = Leaf();\n    s__Node__add(o);\n    return o;\n}",
+        // A child allocated through its parent's create: that create made
+        // to make a Leaf.
+        "Leaf@ s__Leaf__new() {\n    Leaf@ o = Leaf();\n    s__Node__add(o);\n    return o;\n}",
+        "Node@ s__Leaf__allocate(int v) {\n    Node@ c = s__Leaf__new();\n    c.value = v;\n",
         "array<Shape@> si__Shape_all = {null};",
         // Objects and their numbers.
         "    Node@ n = s__Node_create(5);\n    Node@ m = null;\n    Shape@ s = s__Square__allocate();\n    float a = s.area();\n",
-        "    @n.next = s__Leaf__allocate();\n    Jass::SaveInteger(ht, 0, 0, s__Node__id(n));\n    @m = cast<Node>(s__Node__at(Jass::LoadInteger(ht, 0, 0)));\n    if (m is n && !(m.next is null)) {\n        Jass::BJDebugMsg(m.next.describe() + Jass::I2S(m.wcb__type()) + Jass::I2S(2));\n    }\n    Jass::BJDebugMsg(s.name());\n    s__Node__destroy(m);\n",
+        "    @n.next = cast<Leaf>(s__Leaf__allocate(6));\n    Jass::SaveInteger(ht, 0, 0, s__Node__id(n));\n    @m = cast<Node>(s__Node__at(Jass::LoadInteger(ht, 0, 0)));\n    if (m is n && !(m.next is null)) {\n        Jass::BJDebugMsg(m.next.describe() + Jass::I2S(m.wcb__type()) + Jass::I2S(2));\n    }\n    Jass::BJDebugMsg(s.name());\n    s__Node__destroy(m);\n",
     ] {
         assert!(out.contains(part), "{part}\nnot in:\n{out}");
     }

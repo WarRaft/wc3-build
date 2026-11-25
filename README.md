@@ -360,6 +360,19 @@ Shape isn't built into JASS yet").
 rule of the group `pure`, have no duplicate, and check clean for names and
 types; calls only go up.
 
+`tests/manual.rs` (ignored) runs every example of JassHelper's manual
+(`JASSHELPER_MANUAL`: its `topics` folder; a Zinc topic's as Zinc)
+through the editor's parser and the build, and writes what each says to
+`MANUAL_OUT`, for a person to read: an example may be a fragment, show
+an error on purpose, or have the manual's own typo. From it (2026-11-25):
+`/* */` nesting, `a:X`, `defaults nothing`, a cast as what's set
+(`set C(x).z = 5`), a member `integer a[2]`, `S.destroy(x)`, `.size` of
+a sized array or member, a nested scope's names (`Outer_Inner_name`,
+`Inner_name` in `Outer`), a child's `allocate` through its parent's own
+`create` (taking what it takes; in AngelScript that `create` made to make
+the child), a global's or a member's value using a struct an error (it
+panicked). What's left is in `wc3-rs`'s README, Open tasks.
+
 `tests/real.rs` (ignored) builds real scripts: `JASS_GAME` (folders with
 the game's `common.j` and `Blizzard.j`) and `JASS_FILES` (each built
 alone) or `JASS_DIR` (its `.j` files built together, the script written

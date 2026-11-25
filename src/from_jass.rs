@@ -199,15 +199,19 @@ impl Reader<'_> {
                 }),
                 j::TopLevel::Zinc(z) => crate::from_zinc::add(m, f, &z.program, errors),
                 j::TopLevel::Library(l) => {
+                    // A scope in a library or scope is named by its path
+                    // (`Outer_Inner`), as JassHelper names it: two of a name
+                    // in different parents are two.
+                    let name = scope.map_or_else(|| l.name.clone(), |p| format!("{p}_{}", l.name));
                     m.libraries.push(Library {
-                        name: l.name.clone(),
+                        name: name.clone(),
                         scope: l.scope,
                         parent: scope.map(String::from),
                         requires: l.requires.clone(),
                         initializer: l.initializer.clone(),
                         origin: self.origin(l.line),
                     });
-                    self.items(m, f, &l.items, Some(&l.name), errors);
+                    self.items(m, f, &l.items, Some(&name), errors);
                 }
                 j::TopLevel::Struct(st) => {
                     let (fields, methods, mixins) = self.members(&st.members, scope);
@@ -288,6 +292,7 @@ impl Reader<'_> {
             name: g.name.clone(),
             ty: g.type_name.clone(),
             array: g.is_array,
+            size: g.size.as_ref().map(|e| self.expr(e)),
             constant: g.is_constant,
             init: g.initializer.as_ref().map(|e| self.expr(e)),
             owner: owner(scope, &g.modifiers),

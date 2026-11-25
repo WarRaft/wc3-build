@@ -208,6 +208,9 @@ pub struct Global {
     pub name: String,
     pub ty: String,
     pub array: bool,
+    /// A sized array's size, as written (`integer array a[500]`): what
+    /// `a.size` is.
+    pub size: Option<Expr>,
     pub constant: bool,
     pub init: Option<Expr>,
     pub owner: Owner,
@@ -545,7 +548,7 @@ impl Function {
 impl Global {
     /// A variable, of `ty`, set to `init` where the game reads globals.
     pub fn new(name: impl Into<String>, ty: impl Into<String>, init: Option<Expr>, origin: Origin) -> Global {
-        Global { name: name.into(), ty: ty.into(), array: false, constant: false, init, owner: Owner::default(), origin }
+        Global { name: name.into(), ty: ty.into(), array: false, size: None, constant: false, init, owner: Owner::default(), origin }
     }
 }
 
@@ -666,6 +669,16 @@ impl Module {
         }
         for h in &self.hooks {
             push(&h.origin, format!("hook {} {}", h.name, h.target));
+        }
+        // A global's initial value: never a member (lowering refuses one).
+        for g in self.globals.iter().filter(|_| !classes) {
+            let mut member = false;
+            if let Some(e) = &g.init {
+                each_expr(&[Stmt::Return { value: Some(e.clone()), line: 0 }], &mut |x| member |= matches!(x, Expr::Member(..) | Expr::Method(_) | Expr::Element(..)));
+            }
+            if member {
+                push(&g.origin, format!("a member (`a.b`) in the initial value of {}", g.name));
+            }
         }
         for t in self.types.iter().filter(|t| t.size.is_some()) {
             push(&t.origin, format!("dynamic array type {}", t.name));

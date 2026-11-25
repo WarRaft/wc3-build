@@ -17,12 +17,12 @@ fn vjass_goes_in_as_it_is() {
     let text = include_str!("../../jass-rs/tests/fixtures/vjass.j");
     let m = module(&[Source { name: "v.j", text }]).unwrap_or_else(|e| panic!("{e:?}"));
     let libs: Vec<(&str, bool, Option<&str>, Option<&str>)> = m.libraries.iter().map(|l| (l.name.as_str(), l.scope, l.parent.as_deref(), l.initializer.as_deref())).collect();
-    assert_eq!(libs, [("Counters", false, None, Some("Init")), ("Inner", true, Some("Counters"), Some("Start"))]);
+    assert_eq!(libs, [("Counters", false, None, Some("Init")), ("Counters_Inner", true, Some("Counters"), Some("Start"))]);
     let owned = |scope: &str, access| Owner { scope: Some(scope.into()), access };
     let globals: Vec<(&str, Owner)> = m.globals.iter().map(|g| (g.name.as_str(), g.owner.clone())).collect();
     assert_eq!(globals, [("count", owned("Counters", Access::Private)), ("MAX", owned("Counters", Access::Public)), ("sized", owned("Counters", Access::Everyone))]);
     let functions: Vec<(&str, Owner)> = m.functions.iter().map(|f| (f.sig.name.as_str(), f.owner.clone())).collect();
-    assert_eq!(functions, [("Start", owned("Inner", Access::Private)), ("Init", owned("Counters", Access::Private))]);
+    assert_eq!(functions, [("Start", owned("Counters_Inner", Access::Private)), ("Init", owned("Counters", Access::Private))]);
     assert_eq!(m.function_types[0].sig.name, "Callback");
     assert_eq!(m.types[0].name, "IntList");
     assert!(m.types[0].size.is_some());
