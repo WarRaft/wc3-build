@@ -11,6 +11,7 @@ pub mod lower;
 pub mod lua;
 pub mod map;
 pub mod objects;
+pub mod optimize;
 pub mod placed;
 pub mod preprocess;
 pub mod structs;

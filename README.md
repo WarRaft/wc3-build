@@ -343,6 +343,14 @@ Shape isn't built into JASS yet").
   over that frame's bit rate (so a variable bit rate file with a Xing
   frame comes out longer than it plays), an ID3v1 tag at its end taken for
   128 bytes more; rounded to the millisecond. The caller reads the file.
+- **`optimize`** (`jass::Options::optimize`, `[build] optimize=1`): as
+  JassHelper's, a one-line function's calls inlined where nothing can
+  change (each parameter read once and in order, calls after them, not a
+  `set` of a parameter, no local of the caller hiding a name the line
+  reads), then the functions and globals nothing reachable from `main`,
+  `config`, `ExecuteFunc("name")` or a class's methods uses left out
+  (every function kept when an `ExecuteFunc`'s name is told only as the
+  game runs); before names are shortened, for every output.
 - **`whole`**: a map's whole script (`whole::script`): the map's part
   made of its files, the code between its start and its end (the
   triggers' JASS, the map's custom script, the project's code, each with

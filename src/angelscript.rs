@@ -296,7 +296,7 @@ pub fn bool_code(m: &mut Module) {
 }
 
 /// Every name `body` calls, names as code, reads or sets.
-fn names_in(body: &[Stmt], out: &mut Vec<String>) {
+pub(crate) fn names_in(body: &[Stmt], out: &mut Vec<String>) {
     out.extend(called(body));
     each_expr(body, &mut |e| {
         if let Expr::Var(n) | Expr::Index(n, _) = e {
@@ -323,14 +323,14 @@ fn names_in(body: &[Stmt], out: &mut Vec<String>) {
 }
 
 /// The names `g`'s initial value reads and calls.
-fn names_in_global(g: &Global, out: &mut Vec<String>) {
+pub(crate) fn names_in_global(g: &Global, out: &mut Vec<String>) {
     if let Some(e) = &g.init {
         names_in(&[Stmt::Return { value: Some(e.clone()), line: 0 }], out);
     }
 }
 
 /// A JASS string literal's value (`"a\\b"` is `a\b`).
-fn string_value(lit: &str) -> Option<String> {
+pub(crate) fn string_value(lit: &str) -> Option<String> {
     let inner = lit.strip_prefix('"')?.strip_suffix('"')?;
     let mut out = String::new();
     let mut chars = inner.chars();

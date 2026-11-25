@@ -49,6 +49,8 @@ pub struct Options {
     pub game: Vec<Signature>,
     /// The language written ([`Script`]).
     pub script: Script,
+    /// Inlining and dead code left out ([`crate::optimize`]).
+    pub optimize: bool,
     /// The game's `common.j` and `Blizzard.j` as text, for AngelScript
     /// ([`crate::angelscript`]): `common.j`'s names are in `Jass::`, and
     /// what the code uses of `Blizzard.j` is written with it.
@@ -153,6 +155,11 @@ pub fn build_with(m: &Module, options: &Options) -> Result<Built, Vec<Error>> {
         m.globals.extend(globals);
         m.functions = functions.into_iter().map(hoist_locals).collect();
     }
+    let mut notes = Vec::new();
+    if options.optimize {
+        let r = crate::optimize::optimize(&mut m);
+        notes.push(format!("optimized: {} call(s) inlined, {} function(s) and {} global(s) nothing uses left out", r.inlined, r.functions, r.globals));
+    }
     // The game's arrays have 8191 places; Lua's and AngelScript's none.
     if options.script == Script::Jass {
         let mut errors = Vec::new();
@@ -161,9 +168,8 @@ pub fn build_with(m: &Module, options: &Options) -> Result<Built, Vec<Error>> {
             return Err(errors);
         }
     }
-    let mut notes = Vec::new();
     if options.uglify {
-        notes = crate::uglify::uglify(&mut m).kept;
+        notes.extend(crate::uglify::uglify(&mut m).kept);
     }
     let script = match options.script {
         Script::Jass => print(&m),
