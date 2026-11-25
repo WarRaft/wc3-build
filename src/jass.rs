@@ -650,12 +650,12 @@ fn evaluate_forward_calls(functions: Vec<Function>, explicit_only: bool) -> (Vec
         let trig = format!("{PREFIX}trig_{name}");
         let arg = |k: usize| format!("{PREFIX}arg_{name}_{k}");
         let ret = format!("{PREFIX}ret_{name}");
-        globals.push(Global { name: trig.clone(), ty: "trigger".into(), array: false, size: None, constant: false, init: None, owner: Owner::default(), origin: origin(f) });
+        globals.push(Global { name: trig.clone(), ty: "trigger".into(), array: false, size: None, dims: None, constant: false, init: None, owner: Owner::default(), origin: origin(f) });
         for (k, p) in f.sig.params.iter().enumerate() {
-            globals.push(Global { name: arg(k), ty: p.ty.clone(), array: false, size: None, constant: false, init: None, owner: Owner::default(), origin: origin(f) });
+            globals.push(Global { name: arg(k), ty: p.ty.clone(), array: false, size: None, dims: None, constant: false, init: None, owner: Owner::default(), origin: origin(f) });
         }
         if let Some(r) = &f.sig.returns {
-            globals.push(Global { name: ret.clone(), ty: r.clone(), array: false, size: None, constant: false, init: None, owner: Owner::default(), origin: origin(f) });
+            globals.push(Global { name: ret.clone(), ty: r.clone(), array: false, size: None, dims: None, constant: false, init: None, owner: Owner::default(), origin: origin(f) });
         }
         // Above every function: the arguments into the globals, the
         // trigger evaluated, what it returned.
@@ -958,7 +958,7 @@ fn statement(s: &Stmt, depth: usize, out: &mut String) {
             statement(stmt, depth, &mut inner);
             let _ = write!(out, "{pad}debug {}", inner.trim_start());
         }
-        Stmt::SetMember { .. } | Stmt::CallMethod { .. } | Stmt::StaticIf { .. } => unreachable!("not lowered: build checks Module::not_lowered"),
+        Stmt::SetMember { .. } | Stmt::SetElement { .. } | Stmt::CallMethod { .. } | Stmt::StaticIf { .. } => unreachable!("not lowered: build checks Module::not_lowered"),
     }
 }
 

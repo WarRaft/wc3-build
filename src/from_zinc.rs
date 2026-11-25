@@ -258,6 +258,7 @@ impl Reader<'_> {
             ty: v.type_name.clone(),
             array: array.is_some(),
             size: array.clone().flatten(),
+            dims: None,
             constant: v.modifiers.is_constant,
             init: v.initializer.as_ref().map(|e| self.expr(e)),
             owner: self.owner(&v.modifiers),

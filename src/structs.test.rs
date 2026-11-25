@@ -846,3 +846,47 @@ endfunction
     let e = build(&[("t.j", "// @dialect vjass\nstruct Y\nendstruct\nstruct X[10000] extends Y\nendstruct\n")]).unwrap_err();
     assert!(e[0].contains("a struct extending another has its family's index space"), "{e:?}");
 }
+
+#[test]
+fn two_dimensional_arrays() {
+    let out = build(&[(
+        "t.j",
+        r#"// @dialect vjass
+globals
+   integer array mat1 [10][20]
+   constant integer W=100
+   constant integer H=200
+   integer array mat2 [W][H]
+endglobals
+function test takes nothing returns nothing
+    local integer i = 0
+    local integer j = 0
+    local integer c = 0
+    call BJDebugMsg(I2S(mat1.size))
+    loop
+        exitwhen (i==mat1.width)
+        set j = 0
+        loop
+            exitwhen (j==mat1.height)
+            set c = c + 1
+            set mat1[i][j] = c
+            set j = j + 1
+        endloop
+        set i = i + 1
+    endloop
+    call BJDebugMsg(I2S(mat1[0][1]))
+    call BJDebugMsg(I2S(mat2.width))
+    set mat2[99][199] = mat2[1][2]
+endfunction
+"#,
+    )])
+    .unwrap();
+    assert!(out.contains("call BJDebugMsg(I2S(10 * 20))"), "{out}");
+    assert!(out.contains("exitwhen i == 10") && out.contains("exitwhen j == 20"), "{out}");
+    assert!(out.contains("set mat1[i * 20 + j] = c"), "{out}");
+    assert!(out.contains("call BJDebugMsg(I2S(mat1[0 * 20 + 1]))"), "{out}");
+    assert!(out.contains("call BJDebugMsg(I2S(W))"), "{out}");
+    // 100 * 200 places: three of the game's arrays.
+    assert!(out.contains("call wcb__as_mat2(99 * H + 199, wcb__ag_mat2(1 * H + 2))"), "{out}");
+    assert!(out.contains("integer array mat2__2") && !out.contains("mat2__3"), "{out}");
+}

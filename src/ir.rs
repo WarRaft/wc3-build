@@ -213,8 +213,11 @@ pub struct Global {
     pub ty: String,
     pub array: bool,
     /// A sized array's size, as written (`integer array a[500]`): what
-    /// `a.size` is.
+    /// `a.size` is; a 2D one's, its width times its height.
     pub size: Option<Expr>,
+    /// A 2D array's width and height (`integer array a[10][20]`): `a[i][j]`
+    /// is its element `i * height + j`.
+    pub dims: Option<(Expr, Expr)>,
     pub constant: bool,
     pub init: Option<Expr>,
     pub owner: Owner,
@@ -244,6 +247,9 @@ pub enum Stmt {
     /// `object.name = value` (`object.name[index]`): a field of an
     /// instance, or of a struct (`Data.count`).
     SetMember { object: Expr, name: String, index: Option<Expr>, value: Expr, line: usize },
+    /// `target[index] = value` of what isn't a name: `a[i][j]` (an element
+    /// of a 2D array, of a dynamic array's element).
+    SetElement { target: Expr, index: Expr, value: Expr, line: usize },
     /// `object.name(args)`: a method, of an instance or a struct.
     CallMethod { call: MethodCall, line: usize },
     /// `static if`: a branch kept or dropped by constants when built.
@@ -373,6 +379,11 @@ pub fn each_expr(body: &[Stmt], f: &mut impl FnMut(&Expr)) {
                 index.iter().for_each(|e| expr(e, f));
                 expr(value, f);
             }
+            Stmt::SetElement { target, index, value, .. } => {
+                expr(target, f);
+                expr(index, f);
+                expr(value, f);
+            }
             Stmt::CallMethod { call, .. } => {
                 expr(&call.object, f);
                 call.args.iter().for_each(|a| expr(a, f));
@@ -409,6 +420,7 @@ impl Stmt {
     pub fn oop_parts_mut(&mut self) -> (Vec<&mut Expr>, Vec<&mut Vec<Stmt>>) {
         match self {
             Stmt::SetMember { object, index, value, .. } => (std::iter::once(object).chain(index.as_mut()).chain(std::iter::once(value)).collect(), Vec::new()),
+            Stmt::SetElement { target, index, value, .. } => (vec![target, index, value], Vec::new()),
             Stmt::CallMethod { call, .. } => (std::iter::once(&mut call.object).chain(call.args.iter_mut()).collect(), Vec::new()),
             Stmt::StaticIf { cond, then, otherwise, .. } => (vec![cond], std::iter::once(then).chain(otherwise.as_mut()).collect()),
             _ => (Vec::new(), Vec::new()),
@@ -600,7 +612,7 @@ impl Module {
 impl Global {
     /// A variable, of `ty`, set to `init` where the game reads globals.
     pub fn new(name: impl Into<String>, ty: impl Into<String>, init: Option<Expr>, origin: Origin) -> Global {
-        Global { name: name.into(), ty: ty.into(), array: false, size: None, constant: false, init, owner: Owner::default(), origin }
+        Global { name: name.into(), ty: ty.into(), array: false, size: None, dims: None, constant: false, init, owner: Owner::default(), origin }
     }
 }
 
@@ -647,6 +659,7 @@ impl Module {
                     | Stmt::ExitWhen { line, .. }
                     | Stmt::Return { line, .. }
                     | Stmt::SetMember { line, .. }
+                    | Stmt::SetElement { line, .. }
                     | Stmt::CallMethod { line, .. } => *line = to(*line),
                 }
             }
@@ -746,6 +759,7 @@ impl Module {
                 for s in body {
                     match s {
                         Stmt::SetMember { .. } | Stmt::CallMethod { .. } if !classes => *what = what.take().or(Some("a member (`a.b`)")),
+                        Stmt::SetElement { .. } => *what = what.take().or(Some("an element of an element (`a[i][j]`)")),
                         Stmt::StaticIf { .. } => *what = what.take().or(Some("`static if`")),
                         Stmt::If { branches, otherwise, .. } => {
                             branches.iter().for_each(|(_, b)| statements(b, what, classes));

@@ -289,7 +289,12 @@ impl Reader<'_> {
             name: g.name.clone(),
             ty: g.type_name.clone(),
             array: g.is_array,
-            size: g.size.as_ref().map(|e| self.expr(e)),
+            // A 2D array: of its width times its height.
+            size: g.size.as_ref().map(|w| match &g.height {
+                Some(h) => Expr::binary(self.expr(w), BinOp::Mul, self.expr(h)),
+                None => self.expr(w),
+            }),
+            dims: g.size.as_ref().zip(g.height.as_ref()).map(|(w, h)| (self.expr(w), self.expr(h))),
             constant: g.is_constant,
             init: g.initializer.as_ref().map(|e| self.expr(e)),
             owner: owner(scope, &g.modifiers),
@@ -328,10 +333,14 @@ impl Reader<'_> {
             j::Stmt::ExitWhen { cond, line } => Stmt::ExitWhen { cond: self.expr(cond), line: *line },
             j::Stmt::Return { value, line } => Stmt::Return { value: value.as_ref().map(|e| self.expr(e)), line: *line },
             j::Stmt::Debug { stmt, line } => Stmt::Debug { stmt: Box::new(self.stmt(stmt)), line: *line },
+            // `a[i][j] = v`: an element of `a[i]`.
+            j::Stmt::SetMember { target, index: Some(j), value, line, .. } if matches!(target.kind, j::ExprKind::ArrayAccess(..)) => {
+                Stmt::SetElement { target: self.expr(target), index: self.expr(j), value: self.expr(value), line: *line }
+            }
             j::Stmt::SetMember { target, index, value, line, .. } => {
                 let (object, name) = match &target.kind {
                     j::ExprKind::Member(o, n) => (self.expr(o), n.clone()),
-                    _ => unreachable!("the parser sets a member only"),
+                    _ => unreachable!("the parser sets a member or an element only"),
                 };
                 Stmt::SetMember { object, name, index: index.as_ref().map(|e| self.expr(e)), value: self.expr(value), line: *line }
             }

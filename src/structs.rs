@@ -450,6 +450,7 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
     let globals: HashMap<String, String> = m.globals.iter().map(|g| (g.name.clone(), g.ty.clone())).collect();
     let global_arrays: HashSet<String> = m.globals.iter().filter(|g| g.array).map(|g| g.name.clone()).collect();
     let sizes: HashMap<String, Expr> = m.globals.iter().filter_map(|g| Some((g.name.clone(), g.size.clone()?))).collect();
+    let grids: HashMap<String, (Expr, Expr)> = m.globals.iter().filter_map(|g| Some((g.name.clone(), g.dims.clone()?))).collect();
     let dispatched: RefCell<BTreeSet<(String, String)>> = RefCell::new(BTreeSet::new());
     let executed: RefCell<BTreeSet<(String, String)>> = RefCell::new(BTreeSet::new());
     let created: RefCell<BTreeSet<String>> = RefCell::new(BTreeSet::new());
@@ -472,6 +473,7 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
         local_types(&mut f.body, &this_type, &mut locals, &mut arrays);
         let returns = f.sig.returns.clone();
         let cx = Cx {
+            grids: &grids,
             pointed: &pointed,
             created: &created,
             sizes: &sizes,
@@ -1162,6 +1164,8 @@ struct Cx<'a> {
     returns: Option<&'a str>,
     /// The sized global arrays' sizes (`a.size`).
     sizes: &'a HashMap<String, Expr>,
+    /// The 2D global arrays' widths and heights.
+    grids: &'a HashMap<String, (Expr, Expr)>,
     /// Classes': the objects' methods taken as function pointers (struct,
     /// method).
     pointed: &'a RefCell<BTreeSet<(String, String)>>,
@@ -1284,6 +1288,12 @@ impl Cx<'_> {
             }
             _ => None,
         }
+    }
+
+    /// The width and height of the 2D global array `n` (not hidden by a
+    /// local).
+    fn grid(&self, n: &str) -> Option<(Expr, Expr)> {
+        if self.locals.contains_key(n) { None } else { self.grids.get(n).cloned() }
     }
 
     /// The size of the sized array `e` names: a global (`a`), a member
@@ -1598,6 +1608,20 @@ impl Cx<'_> {
                 }
             }
             Stmt::CallMethod { call, line } => self.call_stmt(self.expr(Expr::Method(Box::new(call)), line, errors).0, line),
+            // `a[i][j] = v`: a 2D array's element; else an element of `a[i]`.
+            Stmt::SetElement { target, index, value, line } => {
+                let value = self.value(value, None, line, errors);
+                if let Expr::Index(n, i) = &target
+                    && let Some((_, h)) = self.grid(n)
+                {
+                    let i = self.integer((**i).clone(), line, errors);
+                    let j = self.integer(index, line, errors);
+                    return Stmt::Set { name: n.clone(), index: Some(Expr::binary(Expr::binary(i, BinOp::Mul, h), BinOp::Add, j)), value, line };
+                }
+                let (t, tt) = self.expr(target, line, errors);
+                let index = self.integer(index, line, errors);
+                self.set_element(t, tt, index, value, line, errors)
+            }
             s @ Stmt::StaticIf { .. } => s,
         }
     }
@@ -1732,6 +1756,12 @@ impl Cx<'_> {
             }
             // `a.size` of a sized array: a global's, a member's.
             Expr::Member(object, name) if name == "size" && self.size_of(&object).is_some() => (self.size_of(&object).expect("checked"), Some("integer".into())),
+            // A 2D array's `.width`, `.height`.
+            Expr::Member(object, name) if matches!(name.as_str(), "width" | "height") && matches!(&*object, Expr::Var(n) if self.grid(n).is_some()) => {
+                let Expr::Var(n) = *object else { unreachable!() };
+                let (w, h) = self.grid(&n).expect("checked");
+                (if name == "width" { w } else { h }, Some("integer".into()))
+            }
             // An object's method has no function to name (AngelScript's).
             Expr::Member(object, name) if name == "name" && self.object_method(&object).is_some() => {
                 let (owner, m) = self.object_method(&object).expect("checked");
@@ -1762,6 +1792,15 @@ impl Cx<'_> {
                     Some((t, instance)) => self.member(t, instance, &name, line, errors),
                     None => (Expr::lit("0"), None),
                 }
+            }
+            // `a[i][j]` of a 2D array: its element `i * height + j`.
+            Expr::Element(a, j) if matches!(&*a, Expr::Index(n, _) if self.grid(n).is_some()) => {
+                let Expr::Index(n, i) = *a else { unreachable!() };
+                let (_, h) = self.grid(&n).expect("checked");
+                let i = self.integer(*i, line, errors);
+                let j = self.integer(*j, line, errors);
+                let t = self.type_of_var(&n);
+                (Expr::Index(n, Box::new(Expr::binary(Expr::binary(i, BinOp::Mul, h), BinOp::Add, j))), t)
             }
             Expr::Element(a, i) => {
                 let i = self.integer(*i, line, errors);

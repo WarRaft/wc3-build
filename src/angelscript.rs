@@ -983,7 +983,7 @@ impl Printer<'_> {
             Stmt::CallMethod { call, .. } => {
                 let _ = writeln!(out, "{pad}{};", self.method_call(call));
             }
-            Stmt::StaticIf { .. } => unreachable!("not lowered: build checks Module::not_lowered"),
+            Stmt::SetElement { .. } | Stmt::StaticIf { .. } => unreachable!("not lowered: build checks Module::not_lowered"),
         }
     }
 

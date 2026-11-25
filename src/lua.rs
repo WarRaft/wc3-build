@@ -211,7 +211,7 @@ fn statement(s: &Stmt, depth: usize, out: &mut String, t: &Types) {
         },
         // As the game when it isn't debugging.
         Stmt::Debug { .. } => {}
-        Stmt::SetMember { .. } | Stmt::CallMethod { .. } | Stmt::StaticIf { .. } => unreachable!("not lowered: build checks Module::not_lowered"),
+        Stmt::SetMember { .. } | Stmt::SetElement { .. } | Stmt::CallMethod { .. } | Stmt::StaticIf { .. } => unreachable!("not lowered: build checks Module::not_lowered"),
     }
 }
 
