@@ -382,6 +382,15 @@ impl Reader<'_> {
                 b.push(Stmt::Set { name: var.clone(), index: None, value: Expr::binary(Expr::var(var.clone()), step, Expr::int(1)), line: *line });
                 out.push(Stmt::Loop { body: b, line: *line });
             }
+            // C's: the start once; while the condition holds, the body,
+            // then the steps.
+            z::Stmt::ForC { init, cond, step, body, line } => {
+                out.extend(self.stmts(init));
+                let mut b = vec![Stmt::ExitWhen { cond: not(self.expr(cond)), line: *line }];
+                b.extend(self.stmts(body));
+                b.extend(self.stmts(step));
+                out.push(Stmt::Loop { body: b, line: *line });
+            }
             z::Stmt::Break { line } => out.push(Stmt::ExitWhen { cond: Expr::bool(true), line: *line }),
             z::Stmt::Return { value, line } => {
                 let value = value.as_ref().map(|e| self.expr(e));

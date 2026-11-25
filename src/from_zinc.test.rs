@@ -352,3 +352,12 @@ fn the_manuals_zinc_structs() {
         assert!(out.contains(part), "{part}\nnot in:\n{out}");
     }
 }
+
+#[test]
+fn for_as_c_writes_it() {
+    let m = read("t.zn", "library L {\n    function Sum() -> integer {\n        integer i, s;\n        for (i = 0, s = 0; i < 10 && s < 100; i += 1, s += i) {\n            if (s == 50) break;\n        }\n        return s;\n    }\n}\n");
+    let out = jass(&m);
+    // The start once, then the loop: out when the condition no longer
+    // holds, the body, the steps.
+    assert!(out.contains("set i = 0\nset s = 0\nloop\nexitwhen not (i < 10 and s < 100)\nif s == 50 then\nexitwhen true\nendif\nset i = i + 1\nset s = s + i\nendloop"), "{out}");
+}

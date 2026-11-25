@@ -54,7 +54,9 @@ into it as code too.
   with an `exitwhen not (...)`; `for (0 <= i < n)` sets `i` to the first
   value (one past a strict bound), leaves when past the other
   (`exitwhen i >= n`), and steps by 1 at the end, up or down as the
-  bounds say; `break` is `exitwhen true`; `x += v` is `set x = x + v`;
+  bounds say; C's `for (init; cond; step)` its `init` once, then a
+  `loop` with `exitwhen not (cond)`, the body, the `step`s; `break` is
+  `exitwhen true`; `x += v` is `set x = x + v`;
   `else if` an `elseif`; a block its statements. An anonymous function is
   a function of its own (`wcb__anon_<n>`, private to its library), named
   where it was. An array of more than one dimension isn't read yet.
