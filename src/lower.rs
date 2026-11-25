@@ -178,6 +178,15 @@ pub fn lower_for(m: &Module, game: &[Signature], classes: bool) -> Result<Module
         t.extends = resolve(scope.as_deref(), &t.extends);
         t.owner = Owner::default();
     }
+    // `S.m.exists` in a `static if`: the methods each struct declares (its
+    // modules' taken in), by its name as written.
+    let methods_of: HashMap<String, HashSet<String>> =
+        m.structs.iter().map(|s| (s.name.clone(), s.methods.iter().map(|me| me.function.sig.name.clone()).collect())).collect();
+    let exists = |n: &str, this: Option<&str>| -> Option<Option<bool>> {
+        let (t, me) = n.strip_suffix(".exists")?.split_once('.')?;
+        let t = if t == "thistype" { this? } else { t };
+        Some(methods_of.get(t).map(|ms| ms.contains(me)))
+    };
     for f in &mut m.functions {
         let scope = f.owner.scope.clone();
         let r = |n: &str| resolve(scope.as_deref(), n);
@@ -190,7 +199,7 @@ pub fn lower_for(m: &Module, game: &[Signature], classes: bool) -> Result<Module
             *t = r(t);
         }
         let library = |n: &str| present.contains(n);
-        let constant = |n: &str| constants.get(&r(n)).copied();
+        let constant = |n: &str| exists(n, None).unwrap_or_else(|| constants.get(&r(n)).copied());
         f.body = static_ifs(std::mem::take(&mut f.body), &f.origin.file, &library, &constant, &mut errors);
         scope_strings(&mut f.body, scope.as_deref(), &scopes, &own);
         names(&mut f.body, &r, &own, &ftypes);
@@ -201,6 +210,7 @@ pub fn lower_for(m: &Module, game: &[Signature], classes: bool) -> Result<Module
     for st in &mut m.structs {
         let scope = st.owner.scope.clone();
         let r = |n: &str| resolve(scope.as_deref(), n);
+        let written = st.name.clone();
         st.name = r(&st.name);
         if let Some(e) = &mut st.extends {
             *e = r(e);
@@ -224,7 +234,7 @@ pub fn lower_for(m: &Module, game: &[Signature], classes: bool) -> Result<Module
                 *t = r(t);
             }
             let library = |n: &str| present.contains(n);
-            let constant = |n: &str| constants.get(&r(n)).copied();
+            let constant = |n: &str| exists(n, Some(&written)).unwrap_or_else(|| constants.get(&r(n)).copied());
             f.body = static_ifs(std::mem::take(&mut f.body), &f.origin.file, &library, &constant, &mut errors);
             scope_strings(&mut f.body, scope.as_deref(), &scopes, &own);
             names(&mut f.body, &r, &own, &ftypes);
@@ -529,28 +539,77 @@ fn rename_calls(body: &mut [Stmt], names: &HashMap<String, String>) {
 /// methods, a module's `onInit` named `onInit__<module>`, so each runs.
 fn mixins(m: &mut Module, errors: &mut Vec<Error>) {
     let mixins: HashMap<String, Mixin> = m.mixins.drain(..).map(|x| (x.name.clone(), x)).collect();
+    // What decides a `static if` among members: the libraries there are,
+    // the library's constants, the methods a struct declares.
+    let present: HashSet<String> = m.libraries.iter().map(|l| l.name.clone()).collect();
+    let mut constants: HashMap<(Option<String>, String), bool> = HashMap::new();
+    for g in m.globals.iter().filter(|g| g.constant && g.ty == "boolean") {
+        if let Some(Expr::Literal(v)) = &g.init
+            && let Ok(b) = v.parse::<bool>()
+        {
+            constants.insert((g.owner.scope.clone(), g.name.clone()), b);
+        }
+    }
+    let others: HashMap<String, HashSet<String>> =
+        m.structs.iter().map(|s| (s.name.clone(), s.methods.iter().map(|me| me.function.sig.name.clone()).collect())).collect();
+    // A module's `onInit` is its own (`onInit__M`), not the struct's.
+    fn own_on_init(methods: &mut [Method], blocks: &mut [MemberBlock], module: &str) {
+        for me in methods.iter_mut().filter(|me| me.function.sig.name == "onInit") {
+            me.function.sig.name = format!("onInit__{module}");
+        }
+        for b in blocks {
+            for x in [&mut b.then, &mut b.otherwise] {
+                own_on_init(&mut x.methods, &mut x.static_ifs, module);
+            }
+        }
+    }
     for s in &mut m.structs {
-        let mut todo: Vec<(String, bool)> = std::mem::take(&mut s.mixins);
         let mut seen: HashSet<String> = HashSet::new();
-        while let Some((name, optional)) = todo.pop() {
-            if !seen.insert(name.clone()) {
-                continue;
-            }
-            match mixins.get(&name) {
-                Some(x) => {
-                    s.fields.extend(x.fields.iter().cloned());
-                    for me in &x.methods {
-                        let mut me = me.clone();
-                        if me.function.sig.name == "onInit" {
-                            me.function.sig.name = format!("onInit__{name}");
-                        }
-                        s.methods.push(me);
-                    }
-                    todo.extend(x.mixins.iter().cloned());
+        // Its modules taken in and its `static if`s chosen, until neither
+        // is left: a branch chosen may implement a module, a module bring
+        // a `static if` (in it, `thistype` is this struct).
+        loop {
+            while let Some((name, optional)) = s.mixins.pop() {
+                if !seen.insert(name.clone()) {
+                    continue;
                 }
-                None if optional => {}
-                None => errors.push(Error { origin: s.origin.clone(), message: format!("struct {} implements {name}, which isn't there", s.name) }),
+                match mixins.get(&name) {
+                    Some(x) => {
+                        let mut methods = x.methods.clone();
+                        let mut blocks = x.static_ifs.clone();
+                        own_on_init(&mut methods, &mut blocks, &name);
+                        s.fields.extend(x.fields.iter().cloned());
+                        s.methods.extend(methods);
+                        s.static_ifs.extend(blocks);
+                        s.mixins.extend(x.mixins.iter().cloned());
+                    }
+                    None if optional => {}
+                    None => errors.push(Error { origin: s.origin.clone(), message: format!("struct {} implements {name}, which isn't there", s.name) }),
+                }
             }
+            if s.static_ifs.is_empty() {
+                break;
+            }
+            let own: HashSet<String> = s.methods.iter().map(|me| me.function.sig.name.clone()).collect();
+            let (scope, name) = (s.owner.scope.clone(), s.name.clone());
+            let library = |n: &str| present.contains(n);
+            let constant = |n: &str| match n.strip_suffix(".exists").and_then(|r| r.split_once('.')) {
+                Some((t, me)) if t == "thistype" || t == name => Some(own.contains(me)),
+                Some((t, me)) => others.get(t).map(|ms| ms.contains(me)),
+                None => constants.get(&(scope.clone(), n.to_string())).or_else(|| constants.get(&(None, n.to_string()))).copied(),
+            };
+            let mut chosen = Members::default();
+            for b in std::mem::take(&mut s.static_ifs) {
+                match constant_bool(&b.cond, &library, &constant) {
+                    Some(true) => chosen.append(b.then),
+                    Some(false) => chosen.append(b.otherwise),
+                    None => errors.push(Error { origin: b.origin, message: "a `static if` of what isn't a constant boolean".into() }),
+                }
+            }
+            s.fields.extend(chosen.fields);
+            s.methods.extend(chosen.methods);
+            s.mixins.extend(chosen.mixins);
+            s.static_ifs.extend(chosen.static_ifs);
         }
     }
 }
@@ -897,45 +956,6 @@ fn choose_static_blocks(m: &mut Module, errors: &mut Vec<Error>) {
             }
         }
     }
-    // Among a struct's or module's members, by its library's constants.
-    let present: HashSet<String> = m.libraries.iter().map(|l| l.name.clone()).collect();
-    let mut constants: HashMap<(Option<String>, String), bool> = HashMap::new();
-    for g in m.globals.iter().filter(|g| g.constant && g.ty == "boolean") {
-        if let Some(Expr::Literal(v)) = &g.init
-            && let Ok(b) = v.parse::<bool>()
-        {
-            constants.insert((g.owner.scope.clone(), g.name.clone()), b);
-        }
-    }
-    let choose = |scope: &Option<String>, blocks: Vec<MemberBlock>, into: &mut Members, errors: &mut Vec<Error>| {
-        let library = |n: &str| present.contains(n);
-        let constant = |n: &str| constants.get(&(scope.clone(), n.to_string())).or_else(|| constants.get(&(None, n.to_string()))).copied();
-        let mut pending = blocks;
-        while !pending.is_empty() {
-            for b in std::mem::take(&mut pending) {
-                match constant_bool(&b.cond, &library, &constant) {
-                    Some(true) => into.append(b.then),
-                    Some(false) => into.append(b.otherwise),
-                    None => errors.push(Error { origin: b.origin, message: "a `static if` of what isn't a constant boolean".into() }),
-                }
-            }
-            pending = std::mem::take(&mut into.static_ifs);
-        }
-    };
-    for s in &mut m.structs {
-        let mut chosen = Members::default();
-        choose(&s.owner.scope, std::mem::take(&mut s.static_ifs), &mut chosen, errors);
-        s.fields.extend(chosen.fields);
-        s.methods.extend(chosen.methods);
-        s.mixins.extend(chosen.mixins);
-    }
-    for x in &mut m.mixins {
-        let mut chosen = Members::default();
-        choose(&x.owner.scope, std::mem::take(&mut x.static_ifs), &mut chosen, errors);
-        x.fields.extend(chosen.fields);
-        x.methods.extend(chosen.methods);
-        x.mixins.extend(chosen.mixins);
-    }
 }
 
 /// What a `static if`'s condition is.
@@ -947,6 +967,15 @@ fn constant_bool(e: &Expr, library: &dyn Fn(&str) -> bool, constant: &dyn Fn(&st
         Expr::Var(n) => match n.strip_prefix("LIBRARY_") {
             Some(l) => Some(library(l)),
             None => constant(n),
+        },
+        // `T.m.exists` (`thistype.onInit.exists`): does T declare `m`, as
+        // `constant` knows (asked by `T.m.exists`).
+        Expr::Member(of, n) if n == "exists" => match &**of {
+            Expr::Member(t, m) => match &**t {
+                Expr::Var(t) => constant(&format!("{t}.{m}.exists")),
+                _ => None,
+            },
+            _ => None,
         },
         Expr::Unary(UnaryOp::Not, x) => f(x).map(|b| !b),
         Expr::Binary(a, op, b) => {

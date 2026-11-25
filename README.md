@@ -167,8 +167,14 @@ Shape isn't built into JASS yet").
     a scope or a library with an initializer of its own) isn't called,
     as JassHelper does.
   - `static if` keeps the branch its constants choose: `LIBRARY_<name>`,
-    `DEBUG_MODE` (false), constant boolean globals, `not`, `and`, `or`,
-    `==`, `!=`; anything else is an error. `%` is `ModuloInteger`
+    `DEBUG_MODE` (false), constant boolean globals, `S.m.exists` (does
+    struct `S` declare method `m`, its modules' taken in; `thistype` the
+    struct a method or a module's member is of: in a module, the struct
+    implementing it, so `static if thistype.onInit.exists` is each
+    struct's own), `not`, `and`, `or`, `==`, `!=`; anything else is an
+    error. Among members, a struct's modules are taken in and its `static
+    if`s chosen in turn, until neither is left (a branch may implement a
+    module, a module bring a `static if`). `%` is `ModuloInteger`
     (`ModuloReal` by a real literal).
 - **`structs`** (part of `lower`), as JassHelper does: an instance's field
   `f` of `S` the array `s__S_f` (a field array of `k` by `this * k + i`),

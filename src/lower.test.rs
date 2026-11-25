@@ -198,3 +198,41 @@ fn three_corridors_as_jasshelper_builds_it() {
     }
     assert_eq!(out.matches("function s__List_destroy takes").count(), 1, "{out}");
 }
+
+/// `.exists` in `static if`s (JassHelper's manual, Method exists; its
+/// changelog: static ifs check it): in a module, `thistype` is the struct
+/// that implements it.
+#[test]
+fn static_ifs_of_methods_that_exist() {
+    let text = concat!(
+        "// @dialect vjass\n",
+        "module Init\n",
+        "    static if thistype.onInit.exists then\n",
+        "        static method wrapped takes nothing returns nothing\n            call BJDebugMsg(\"has\")\n        endmethod\n",
+        "    else\n",
+        "        static method wrapped takes nothing returns nothing\n            call BJDebugMsg(\"none\")\n        endmethod\n",
+        "    endif\n",
+        "    static method check takes nothing returns boolean\n",
+        "        static if thistype.onInit.exists then\n            return true\n        else\n            return false\n        endif\n",
+        "    endmethod\n",
+        "endmodule\n",
+        "struct A\n    implement Init\n    private static method onInit takes nothing returns nothing\n    endmethod\nendstruct\n",
+        "struct B\n    implement Init\nendstruct\n",
+        "function F takes nothing returns integer\n",
+        "    static if A.wrapped.exists and not B.missing.exists then\n        return 1\n    endif\n    return 0\n",
+        "endfunction\n",
+        "function main takes nothing returns nothing\n    call A.wrapped()\n    call B.wrapped()\n    call F()\nendfunction\n",
+        "function config takes nothing returns nothing\nendfunction\n",
+    );
+    let m = crate::from_jass::module(&[crate::from_jass::Source { name: "t.j", text }]).unwrap_or_else(|e| panic!("{e:?}"));
+    let out = crate::jass::build(&m).unwrap_or_else(|e| panic!("{e:?}"));
+    crate::structs::tests::as_the_games(&out);
+    let body = |f: &str| {
+        let at = out.find(&format!("function {f} takes")).unwrap_or_else(|| panic!("{f}\n{out}"));
+        out[at..at + out[at..].find("endfunction").unwrap()].to_string()
+    };
+    // A has its own onInit, B hasn't: each its branch.
+    assert!(body("s__A_wrapped").contains("\"has\"") && body("s__B_wrapped").contains("\"none\""), "{out}");
+    assert!(body("s__A_check").contains("return true") && body("s__B_check").contains("return false"), "{out}");
+    assert!(body("F").contains("return 1"), "{out}");
+}
