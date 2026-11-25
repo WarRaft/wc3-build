@@ -80,7 +80,9 @@ endfunction
         "string Name(int i) {\n    if (names[i] == \"\") {\n        return \"\";\n    }\n    return names[i];\n}",
         "int F(int a, int b) {\n    int i = 0;\n    int wcb__in = 0;\n    WC3::unit_array units;\n    while (true) {\n        if (i >= 10 && (a != b || done)) break;\n        i = i + a / b;\n        names[i] = \"x\" + Name(a) + \"\\n\";\n        if (a == 'hfoo') {\n            return 0xFF;\n        } else if (b == 15) {\n            Jass::TimerStart(Jass::CreateTimer(), half, false, @Tick);\n        } else {\n        }\n    }\n    units[0] = nil;\n    wcb__in = Jass::PLAYER_NEUTRAL_AGGRESSIVE;\n    return i;\n}",
         "void Tick() {\n    StartTimerBJ(t, false, bj_PI);\n}",
-        "void main() {\n    Jass::TriggerAddCondition(Jass::CreateTrigger(), Jass::Condition(@Tick));\n}",
+        // Tick returns nothing: a BoolexprFunc of its own calls it.
+        "void main() {\n    Jass::TriggerAddCondition(Jass::CreateTrigger(), Jass::Condition(@wcb__bool_Tick));\n}",
+        "bool wcb__bool_Tick() {\n    Tick();\n    return false;\n}",
         "timer StartTimerBJ(timer t, bool periodic, float timeout) {\n    bj_lastStartedTimer = t;\n    Jass::TimerStart(t, timeout, periodic, null);\n    return bj_lastStartedTimer;\n}",
         "class string_array {",
         "class unit_array {",
@@ -89,6 +91,45 @@ endfunction
     }
     // What isn't used of Blizzard.j isn't written.
     assert!(!out.contains("Unused") && !out.contains("bj_unused"), "{out}");
+}
+
+#[test]
+fn code_as_ujapis_funcdefs() {
+    let out = angelscript(r#"globals
+    code array actions
+    code check
+endglobals
+function Yes takes nothing returns boolean
+    return true
+endfunction
+function Act takes nothing returns nothing
+endfunction
+function Hand takes code c returns conditionfunc
+    return Condition(c)
+endfunction
+function main takes nothing returns nothing
+    local code a = function Act
+    set check = function Yes
+    set actions[1] = function Yes
+    call Hand(check)
+    call Hand(function Act)
+    call TimerStart(CreateTimer(), 1., false, actions[1])
+    if a == null then
+    endif
+endfunction
+"#);
+    for part in [
+        // Passed on to Condition: a BoolexprFunc, and what's given to it.
+        "WC3::CallbackFunc_array actions;\nBoolexprFunc@ check = null;\n",
+        "conditionfunc Hand(BoolexprFunc@ c) {\n    return Jass::Condition(c);\n}",
+        "    CallbackFunc@ a = @Act;\n    @check = @Yes;\n    actions[1] = @wcb__void_Yes;\n    Hand(check);\n    Hand(@wcb__bool_Act);\n",
+        "if (a is null) {",
+        "void wcb__void_Yes() {\n    Yes();\n}",
+        "class CallbackFunc_array {\n        private array<CallbackFunc@> v;",
+        "@v[i] = @x;",
+    ] {
+        assert!(out.contains(part), "{part}\nnot in:\n{out}");
+    }
 }
 
 #[test]

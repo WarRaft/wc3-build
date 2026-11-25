@@ -10,8 +10,16 @@
 //!   code declares itself too;
 //! - every type extending `handle` is a global type of its own (a `uint`),
 //!   its empty value `nil`; `integer`, `real`, `boolean`, `string` are
-//!   `int`, `float`, `bool`, `string`; `code` is UjAPI's `funcdef`
-//!   (`code@`), `function F` is `@F`;
+//!   `int`, `float`, `bool`, `string`; `function F` is `@F`;
+//! - AngelScript has no `code`: UjAPI declares two funcdefs for callbacks,
+//!   `void CallbackFunc()` and `bool BoolexprFunc()`. `Condition` and
+//!   `Filter` take a `BoolexprFunc`, every other native a `CallbackFunc`;
+//!   a `code` variable or parameter is a `BoolexprFunc@` when it's passed
+//!   on to one that takes a `BoolexprFunc` ([`bool_code`]), else a
+//!   `CallbackFunc@`. A function unlike what it's given to (JASS lets
+//!   `Condition(function F)` have an `F` returning nothing) goes through
+//!   one written for it (`wcb__bool_F` returning `false` after calling it,
+//!   `wcb__void_F`);
 //! - `'hfoo'` is written as in JASS;
 //! - UjAPI ships no `Blizzard.j`: the functions and globals of it the code
 //!   uses, and what they use, are taken ([`take_used`]) and written here
@@ -63,7 +71,7 @@ const WORDS: &[&str] = &[
     "abstract", "and", "auto", "bool", "break", "case", "cast", "catch", "class", "const", "continue", "default", "do", "double", "else", "enum", "explicit", "external",
     "false", "final", "float", "for", "from", "funcdef", "function", "get", "if", "import", "in", "inout", "int", "int16", "int32", "int64", "int8", "interface", "is",
     "mixin", "namespace", "nil", "not", "null", "or", "out", "override", "private", "property", "protected", "return", "set", "shared", "super", "switch", "this",
-    "true", "try", "typedef", "uint", "uint16", "uint32", "uint64", "uint8", "void", "while", "xor", "Jass", "WC3", "array", "code",
+    "true", "try", "typedef", "uint", "uint16", "uint32", "uint64", "uint8", "void", "while", "xor", "Jass", "WC3", "array", "CallbackFunc", "BoolexprFunc",
 ];
 
 /// A name of the code's, as AngelScript can have it.
@@ -77,7 +85,8 @@ fn ty(t: &str) -> String {
         "integer" => "int".into(),
         "real" => "float".into(),
         "boolean" => "bool".into(),
-        "code" => "code@".into(),
+        "code" => "CallbackFunc@".into(),
+        BOOL_CODE => "BoolexprFunc@".into(),
         _ => t.into(),
     }
 }
@@ -89,7 +98,7 @@ fn empty(t: &str) -> &'static str {
         "real" => "0.0f",
         "boolean" => "false",
         "string" => "\"\"",
-        "code" => "null",
+        "code" | BOOL_CODE => "null",
         _ => "nil",
     }
 }
@@ -104,7 +113,7 @@ fn array_classes(types: &BTreeSet<String>) -> String {
     let mut out = String::from("namespace WC3 {\n");
     for t in types {
         let (class, elem, empty) = (array_class(t), ty(t), empty(t));
-        let at = if t == "code" { "@" } else { "" };
+        let at = if is_code(t) { "@" } else { "" };
         let _ = write!(
             out,
             "    // A JASS array: any index read, what's never set {empty}.
@@ -125,6 +134,107 @@ fn array_classes(types: &BTreeSet<String>) -> String {
     }
     out += "}\n";
     out
+}
+
+/// The type of a `code` that's a `BoolexprFunc` ([`bool_code`]).
+const BOOL_CODE: &str = "code:bool";
+
+/// The natives taking a `BoolexprFunc` where JASS has `code`.
+const BOOL_SLOTS: &[&str] = &["Condition", "Filter"];
+
+fn is_code(t: &str) -> bool {
+    t == "code" || t == BOOL_CODE
+}
+
+/// Calls `f` with every call in `body`, statements' and expressions'.
+fn each_call(body: &[Stmt], f: &mut impl FnMut(&Call)) {
+    each_expr(body, &mut |e| {
+        if let Expr::Call(c) = e {
+            f(c);
+        }
+    });
+    each_call_stmts(body, f);
+    fn each_call_stmts(body: &[Stmt], f: &mut impl FnMut(&Call)) {
+        for s in body {
+            match s {
+                Stmt::Call { call, .. } => f(call),
+                Stmt::If { branches, otherwise, .. } => {
+                    branches.iter().for_each(|(_, b)| each_call_stmts(b, f));
+                    if let Some(b) = otherwise {
+                        each_call_stmts(b, f);
+                    }
+                }
+                Stmt::Loop { body, .. } => each_call_stmts(body, f),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Makes [`BOOL_CODE`] every `code` global, parameter and local passed
+/// to what takes a `BoolexprFunc` (a native of [`BOOL_SLOTS`], or a
+/// parameter made one), until nothing more is.
+pub fn bool_code(m: &mut Module) {
+    fn retype(body: &mut [Stmt], name: &str) -> bool {
+        let mut changed = false;
+        for s in body {
+            match s {
+                Stmt::Local { ty, name: n, .. } if n == name && ty == "code" => {
+                    *ty = BOOL_CODE.into();
+                    changed = true;
+                }
+                Stmt::If { branches, otherwise, .. } => {
+                    for (_, b) in branches.iter_mut() {
+                        changed |= retype(b, name);
+                    }
+                    if let Some(b) = otherwise {
+                        changed |= retype(b, name);
+                    }
+                }
+                Stmt::Loop { body, .. } => changed |= retype(body, name),
+                _ => {}
+            }
+        }
+        changed
+    }
+    loop {
+        let params: HashMap<String, Vec<String>> = m.functions.iter().map(|f| (f.sig.name.clone(), f.sig.params.iter().map(|p| p.ty.clone()).collect())).collect();
+        let mut marks: Vec<(Option<usize>, String)> = Vec::new();
+        for (fi, f) in m.functions.iter().enumerate() {
+            let mut own: HashMap<String, String> = f.sig.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect();
+            locals(&f.body, &mut own);
+            each_call(&f.body, &mut |c| {
+                for (i, a) in c.args.iter().enumerate() {
+                    let slot = BOOL_SLOTS.contains(&c.name.as_str()) || params.get(&c.name).and_then(|p| p.get(i)).is_some_and(|t| t == BOOL_CODE);
+                    if let (true, Expr::Var(n) | Expr::Index(n, _)) = (slot, a) {
+                        marks.push((own.contains_key(n).then_some(fi), n.clone()));
+                    }
+                }
+            });
+        }
+        let mut changed = false;
+        for (fi, n) in marks {
+            match fi {
+                Some(fi) => {
+                    let f = &mut m.functions[fi];
+                    for p in f.sig.params.iter_mut().filter(|p| p.name == n && p.ty == "code") {
+                        p.ty = BOOL_CODE.into();
+                        changed = true;
+                    }
+                    changed |= retype(&mut f.body, &n);
+                }
+                None => {
+                    for g in m.globals.iter_mut().filter(|g| g.name == n && g.ty == "code") {
+                        g.ty = BOOL_CODE.into();
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
 }
 
 /// Every name `body` calls, names as code, reads or sets.
@@ -201,17 +311,27 @@ struct Printer<'a> {
     /// The module's globals (taken from `Blizzard.j` too).
     globals: HashSet<&'a str>,
     arrays: BTreeSet<String>,
+    /// Functions given where they don't fit: `(F, as a BoolexprFunc)`.
+    wrappers: std::cell::RefCell<BTreeSet<(String, bool)>>,
 }
 
 /// The AngelScript of `m` (made the game's JASS: lowered, merged, what it
 /// uses of `Blizzard.j` taken in); `game` the game's natives and functions,
 /// for what they take and give back; `common` what's in `Jass::`.
 pub fn print(m: &Module, game: &[Signature], common: &Common) -> String {
+    let mut m = m.clone();
+    bool_code(&mut m);
+    let m = &m;
     let mut common = common.clone();
+    for n in BOOL_SLOTS {
+        if let Some(s) = common.natives.get_mut(*n) {
+            s.params.iter_mut().filter(|p| p.ty == "code").for_each(|p| p.ty = BOOL_CODE.into());
+        }
+    }
     for n in &m.natives {
         common.natives.insert(n.sig.name.clone(), n.sig.clone());
     }
-    let mut p = Printer { types: Types { globals: HashMap::new(), returns: HashMap::new(), locals: HashMap::new() }, common: &common, params: HashMap::new(), returns: None, arrays: BTreeSet::new(), globals: m.globals.iter().map(|g| g.name.as_str()).collect() };
+    let mut p = Printer { types: Types { globals: HashMap::new(), returns: HashMap::new(), locals: HashMap::new() }, common: &common, params: HashMap::new(), returns: None, arrays: BTreeSet::new(), wrappers: Default::default(), globals: m.globals.iter().map(|g| g.name.as_str()).collect() };
     for (name, t) in &common.globals {
         p.types.globals.insert(name, t);
     }
@@ -244,6 +364,14 @@ pub fn print(m: &Module, game: &[Signature], common: &Common) -> String {
         let _ = writeln!(body, "\n{returns} {}({}) {{", ident(&f.sig.name), params.join(", "));
         p.statements(&f.body, 1, &mut body);
         body += "}\n";
+    }
+    for (f, boolean) in p.wrappers.borrow().iter() {
+        let call = format!("{}()", ident(f));
+        let _ = if *boolean {
+            writeln!(body, "\nbool {}bool_{f}() {{\n    {call};\n    return false;\n}}", crate::jass::PREFIX)
+        } else {
+            writeln!(body, "\nvoid {}void_{f}() {{\n    {call};\n}}", crate::jass::PREFIX)
+        };
     }
     let mut out = String::from("// Made by wc3-build from JASS.\n");
     if !p.arrays.is_empty() {
@@ -349,6 +477,17 @@ impl Printer<'_> {
     fn value(&self, e: &Expr, want: Option<&str>) -> String {
         match (e, want) {
             (Expr::Literal(l), Some(t)) if l == "null" => empty(t).to_string(),
+            (Expr::Code(f), Some(t)) if is_code(t) => {
+                let boolean = t == BOOL_CODE;
+                let returns = self.types.returns.get(f.as_str()).copied().flatten();
+                let fits = if boolean { returns == Some("boolean") } else { returns.is_none() };
+                if fits {
+                    format!("@{}", ident(f))
+                } else {
+                    self.wrappers.borrow_mut().insert((f.clone(), boolean));
+                    format!("@{}{}_{f}", crate::jass::PREFIX, if boolean { "bool" } else { "void" })
+                }
+            }
             _ => self.expr(e, 0),
         }
     }
@@ -368,7 +507,7 @@ impl Printer<'_> {
             Stmt::Set { name, index, value, .. } => {
                 let want = self.var_type(name);
                 let index = index.as_ref().map_or(String::new(), |i| format!("[{}]", self.expr(i, 0)));
-                let at = if want.as_deref() == Some("code") && index.is_empty() { "@" } else { "" };
+                let at = if want.as_deref().is_some_and(is_code) && index.is_empty() { "@" } else { "" };
                 let _ = writeln!(out, "{pad}{at}{}{index} = {};", self.var(name), self.value(value, want.as_deref()));
             }
             Stmt::Call { call: c, .. } => {
@@ -454,7 +593,7 @@ impl Printer<'_> {
                     Expr::Literal(l) if l == "null" && other.is_some() => empty(other.as_deref().unwrap_or_default()).to_string(),
                     _ => self.expr(x, min),
                 };
-                let code = ta.as_deref() == Some("code") || tb.as_deref() == Some("code");
+                let code = ta.as_deref().is_some_and(is_code) || tb.as_deref().is_some_and(is_code);
                 let sign = match op {
                     BinOp::Eq if code => "is",
                     BinOp::NotEq if code => "!is",

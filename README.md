@@ -92,8 +92,12 @@ Shape isn't built into JASS yet").
   decided with its author: after the same steps but sorting (AngelScript
   calls a function wherever it is), `common.j`'s natives and globals in
   `Jass::` (`jass::Options::common_j`), every handle type a type of its
-  own with `nil`, `int`/`float`/`bool`/`string`, `code` UjAPI's funcdef
-  (`code@`, `function F` as `@F`), `'hfoo'` as in JASS, `void main()`
+  own with `nil`, `int`/`float`/`bool`/`string`, `function F` as `@F`,
+  `code` one of UjAPI's funcdefs (`void CallbackFunc()`; `bool
+  BoolexprFunc()` for `Condition` and `Filter`, and for a `code`
+  variable or parameter passed on to them: `bool_code`; a function
+  unlike the funcdef it's given as through one written for it,
+  `wcb__bool_F`, `wcb__void_F`), `'hfoo'` as in JASS, `void main()`
   and `void config()`. UjAPI ships no `Blizzard.j`: what the code uses
   of it (`Options::blizzard_j`), and what that uses, is taken in
   (`take_used`, tree-shaking) and written too. An array is a class of
