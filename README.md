@@ -371,7 +371,16 @@ a sized array or member, a nested scope's names (`Outer_Inner_name`,
 `Inner_name` in `Outer`), a child's `allocate` through its parent's own
 `create` (taking what it takes; in AngelScript that `create` made to make
 the child), a global's or a member's value using a struct an error (it
-panicked). What's left is in `wc3-rs`'s README, Open tasks.
+panicked); an interface's members (a parent's to its structs: arrays
+`s__I_x`, their defaults set by each struct's allocator; in AngelScript
+its class's), `I.create(typeid)` (`s__I__create_by_type`: the struct's
+`create` taking nothing, else its allocator; 0 for none), a function
+interface's value from a function's name (`repeater3(2.0, double)`), a
+static method (`f = S.m`) or an object's (`S.m`, taking its instance
+first; in AngelScript `wcb__p_S_m` taking its number), `x.m.exists`
+(known from the declarations, else by the instance's type). A class
+named as a word of AngelScript's (`try`) is written with the build's
+prefix. What's left is in `wc3-rs`'s README, Open tasks.
 
 `tests/real.rs` (ignored) builds real scripts: `JASS_GAME` (folders with
 the game's `common.j` and `Blizzard.j`) and `JASS_FILES` (each built

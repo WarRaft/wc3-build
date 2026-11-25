@@ -252,7 +252,9 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
     };
     for i in &interfaces {
         let methods = i.methods.iter().map(|me| (me.function.sig.name.clone(), method_info(me, &i.name))).collect();
-        infos.insert(i.name.clone(), Info { name: i.name.clone(), interface: true, array: false, parent: None, fields: HashMap::new(), methods, delegates: Vec::new(), typeid: 0 });
+        // Its members, a parent's to the structs extending it.
+        let fields = i.fields.iter().map(|f| (f.name.clone(), (f.ty.clone(), f.is_static, f.array.clone().flatten().as_ref().and_then(literal_int), f.array.is_some()))).collect();
+        infos.insert(i.name.clone(), Info { name: i.name.clone(), interface: true, array: false, parent: None, fields, methods, delegates: Vec::new(), typeid: 0 });
     }
     for s in &structs {
         let err = |errors: &mut Vec<Error>, what: &str| errors.push(Error { origin: s.origin.clone(), message: format!("struct {}: {what} isn't built into JASS yet", s.name) });
@@ -331,6 +333,23 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
         }
     }
 
+    // An interface's members: arrays as a struct's (in AngelScript, its
+    // class's, but the static ones).
+    for i in &interfaces {
+        let info = &types.infos[&i.name];
+        for f in i.fields.iter().filter(|f| !classes || f.is_static) {
+            let mut g = Global::new(info.field(&f.name), f.ty.clone(), None, i.origin.clone());
+            g.constant = f.constant;
+            if f.is_static {
+                g.array = f.array.is_some();
+                g.size = f.array.clone().flatten();
+                g.init = f.init.clone();
+            } else {
+                g.array = true;
+            }
+            m.globals.push(g);
+        }
+    }
     // Globals, the allocators, the methods as functions.
     let mut inits = Vec::new();
     // Classes': each instance method's function, its struct and name.
@@ -353,7 +372,7 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
             m.globals.push(g);
         }
         if !info.array && !classes {
-            allocator(m, &types, &structs, s);
+            allocator(m, &types, &structs, &interfaces, s);
         }
         let mut own_inits = 0;
         for me in &s.methods {
@@ -408,6 +427,8 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
     let sizes: HashMap<String, Expr> = m.globals.iter().filter_map(|g| Some((g.name.clone(), g.size.clone()?))).collect();
     let dispatched: RefCell<BTreeSet<(String, String)>> = RefCell::new(BTreeSet::new());
     let executed: RefCell<BTreeSet<(String, String)>> = RefCell::new(BTreeSet::new());
+    let created: RefCell<BTreeSet<String>> = RefCell::new(BTreeSet::new());
+    let pointed: RefCell<BTreeSet<(String, String)>> = RefCell::new(BTreeSet::new());
     let pointers = Pointers::default();
     for f in &mut m.functions {
         // In a method `thistype` is its struct.
@@ -426,6 +447,8 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
         local_types(&mut f.body, &this_type, &mut locals, &mut arrays);
         let returns = f.sig.returns.clone();
         let cx = Cx {
+            pointed: &pointed,
+            created: &created,
             sizes: &sizes,
             executed: &executed,
             classes,
@@ -448,6 +471,9 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
         if current.is_some() {
             f.owner = Owner::default();
         }
+    }
+    for i in created.into_inner() {
+        create_by_type(m, &types, &i, classes);
     }
     let mut setup = Vec::new();
     if classes {
@@ -489,6 +515,26 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
         }
         m.structs = structs;
         m.interfaces = interfaces;
+        // An object's method taken as a function pointer: a function taking
+        // its number first.
+        for (owner, name) in pointed.into_inner() {
+            let Some((_, x)) = types.method(&owner, &name) else { continue };
+            let this_type = |t: &str| if t == "thistype" { owner.clone() } else { t.to_string() };
+            let mut params = vec![Param { ty: "integer".into(), name: format!("{}i", crate::jass::PREFIX) }];
+            params.extend(x.params.iter().map(|p| Param { ty: this_type(&p.ty), name: p.name.clone() }));
+            let object = cast(&owner, Expr::call(format!("s__{}__at", types.root(&owner)), vec![Expr::var(format!("{}i", crate::jass::PREFIX))]));
+            let call = MethodCall { object, name: class_method(&name, &owner), args: x.params.iter().map(|p| Expr::var(p.name.clone())).collect() };
+            let body = match &x.returns {
+                Some(_) => vec![Stmt::Return { value: Some(Expr::Method(Box::new(call))), line: 0 }],
+                None => vec![Stmt::CallMethod { call, line: 0 }],
+            };
+            m.functions.push(Function {
+                sig: Signature { name: format!("{}p_{owner}_{}", crate::jass::PREFIX, class_method(&name, &owner)), params, returns: x.returns.as_ref().map(|r| this_type(r)), constant: false },
+                body,
+                owner: Owner::default(),
+                origin: Origin::file("the build"),
+            });
+        }
         // An object's method run by `.execute`: a function taking it first.
         for (owner, name) in executed.into_inner() {
             let Some((_, x)) = types.method(&owner, &name) else { continue };
@@ -633,6 +679,30 @@ fn parent_create<'a>(types: &'a Types, structs: &[Struct], s: &str) -> Option<(&
     })
 }
 
+/// `I.create(t)` of the interface `i`: `s__I__create_by_type(t)`, an
+/// instance of its struct whose type is `t`, made by its own `create` if
+/// that takes nothing, else by its allocator (as JassHelper does); none
+/// (0, AngelScript's `null`) for another `t`.
+fn create_by_type(m: &mut Module, types: &Types, i: &str, classes: bool) {
+    let none = if classes { null_object() } else { Expr::int(0) };
+    let mut body = Vec::new();
+    for s in types.families.get(i).into_iter().flatten() {
+        let info = &types.infos[s];
+        let own = info.methods.get("create").is_some_and(|x| x.is_static && x.params.is_empty());
+        let make = Expr::call(if own { info.method("create") } else { info.method("_allocate") }, Vec::new());
+        body.push(Stmt::If {
+            branches: vec![(Expr::binary(Expr::var("t"), BinOp::Eq, Expr::int(info.typeid)), vec![Stmt::Return { value: Some(make), line: 0 }])],
+            otherwise: None,
+            line: 0,
+        });
+    }
+    body.push(Stmt::Return { value: Some(none), line: 0 });
+    let mut f = Function::new(format!("s__{i}__create_by_type"), body, Origin::file("the build"));
+    f.sig.params = vec![Param { ty: "integer".into(), name: "t".into() }];
+    f.sig.returns = Some(i.to_string());
+    m.functions.push(f);
+}
+
 /// Classes': the function `name`, `p`'s own `create` made to make a `c`
 /// (a child of `p`): its allocation `s__c__new()` (the printer's, an
 /// object of `c`), or, when `p` is itself allocated through a parent's
@@ -702,7 +772,7 @@ fn retarget_calls(body: &mut [Stmt], to: &HashMap<String, String>) {
     }
 }
 
-fn allocator(m: &mut Module, types: &Types, structs: &[Struct], s: &Struct) {
+fn allocator(m: &mut Module, types: &Types, structs: &[Struct], interfaces: &[Interface], s: &Struct) {
     let info = &types.infos[&s.name];
     let root = types.root(&s.name).to_string();
     let several = types.several(&s.name);
@@ -766,12 +836,16 @@ fn allocator(m: &mut Module, types: &Types, structs: &[Struct], s: &Struct) {
     if several {
         alloc.push(Stmt::set_at(types.type_global(&root), this(), Expr::int(info.typeid)));
     }
-    // The fields with a value, its parents' first.
+    // The fields with a value, its parents' first (an interface's too).
     for i in types.chain(&s.name).into_iter().rev() {
-        let Some(x) = structs.iter().find(|x| x.name == i.name) else {
-            continue;
+        let fields = match structs.iter().find(|x| x.name == i.name) {
+            Some(x) => &x.fields,
+            None => match interfaces.iter().find(|x| x.name == i.name) {
+                Some(x) => &x.fields,
+                None => continue,
+            },
         };
-        for f in x.fields.iter().filter(|f| !f.is_static && f.array.is_none()) {
+        for f in fields.iter().filter(|f| !f.is_static && f.array.is_none()) {
             if let Some(init) = &f.init {
                 alloc.push(Stmt::set_at(i.field(&f.name), this(), init.clone()));
             }
@@ -1041,6 +1115,11 @@ struct Cx<'a> {
     returns: Option<&'a str>,
     /// The sized global arrays' sizes (`a.size`).
     sizes: &'a HashMap<String, Expr>,
+    /// Classes': the objects' methods taken as function pointers (struct,
+    /// method).
+    pointed: &'a RefCell<BTreeSet<(String, String)>>,
+    /// The interfaces whose `I.create(typeid)` is used.
+    created: &'a RefCell<BTreeSet<String>>,
     /// Classes': the objects' methods run by `.execute` (struct, method).
     executed: &'a RefCell<BTreeSet<(String, String)>>,
     types: &'a Types,
@@ -1178,6 +1257,81 @@ impl Cx<'_> {
             }
             _ => None,
         }
+    }
+
+    /// `e` where a value of the function interface `want` goes, when it
+    /// names a function: a function (`double`), a struct's static method
+    /// (`S.m`), or its method of an instance (`S.m`: a function taking the
+    /// instance first). Its number among `want`'s functions; `None` when
+    /// `e` names none.
+    fn pointer(&self, e: &Expr, want: &str, line: usize, errors: &mut Vec<Error>) -> Option<Expr> {
+        let sig = self.types.functions.get(want)?;
+        let (f, takes, returns): (String, Vec<String>, Option<String>) = match e {
+            Expr::Var(f) if self.type_of_var(f).is_none() && self.params.contains_key(f) => (f.clone(), self.params[f].clone(), self.sigs.get(f).cloned().flatten()),
+            Expr::Member(o, m) => {
+                let info = self.struct_named(o)?;
+                let (owner, x) = self.types.method(&info.name, m)?;
+                let mut takes: Vec<String> = x.params.iter().map(|p| p.ty.clone()).collect();
+                let f = if x.is_static {
+                    owner.method(m)
+                } else {
+                    takes.insert(0, owner.name.clone());
+                    if self.is_class(&owner.name) {
+                        // No function of its own: one taking the instance's number.
+                        self.pointed.borrow_mut().insert((owner.name.clone(), m.clone()));
+                        format!("{}p_{}_{}", crate::jass::PREFIX, owner.name, class_method(m, &owner.name))
+                    } else {
+                        owner.method(m)
+                    }
+                };
+                (f, takes, x.returns.clone())
+            }
+            _ => return None,
+        };
+        // A struct is an integer here (its number).
+        let same = |a: &str, b: &str| a == b || [a, b].iter().all(|t| *t == "integer" || self.types.infos.contains_key(*t));
+        if takes.len() != sig.params.len() || takes.iter().zip(&sig.params).any(|(a, b)| !same(a, &b.ty)) || returns.as_deref().zip(sig.returns.as_deref()).is_some_and(|(a, b)| !same(a, b)) || returns.is_some() != sig.returns.is_some() {
+            self.error(errors, line, format!("{f} doesn't take and return what the function interface {want} does"));
+        }
+        Some(Expr::int(self.pointers.number(want, &f)))
+    }
+
+    /// `e` lowered where a `want` goes: a function's pointer when `want` is a
+    /// function interface ([`Cx::pointer`]), else coerced ([`Cx::coerce`]).
+    fn value(&self, e: Expr, want: Option<&str>, line: usize, errors: &mut Vec<Error>) -> Expr {
+        if let Some(p) = want.and_then(|w| self.pointer(&e, w, line, errors)) {
+            return p;
+        }
+        let (e, t) = self.expr(e, line, errors);
+        self.coerce(e, t.as_deref(), want)
+    }
+
+    /// `o.m.exists` (`o` an instance, or a struct by its name).
+    fn exists(&self, o: Expr, m: &str, line: usize, errors: &mut Vec<Error>) -> (Expr, Option<String>) {
+        let has = |t: &str| self.types.method(t, m).is_some_and(|(_, x)| !x.abstract_);
+        let boolean = Some("boolean".to_string());
+        if let Some(info) = self.struct_named(&o) {
+            return (Expr::bool(has(&info.name)), boolean);
+        }
+        let (o, t) = self.expr(o, line, errors);
+        let Some(t) = t.filter(|t| self.types.infos.contains_key(t)) else {
+            self.error(errors, line, format!(".{m}.exists of what isn't a struct (or whose type can't be told)"));
+            return (Expr::bool(false), boolean);
+        };
+        if self.types.method(&t, m).is_none() {
+            self.error(errors, line, format!("{t}.{m}.exists: {t} has no method {m}"));
+            return (Expr::bool(false), boolean);
+        }
+        // A struct alone, or the whole family alike: known now.
+        let family: Vec<&Info> = self.types.families.get(self.types.root(&t)).into_iter().flatten().map(|s| &self.types.infos[s]).filter(|i| self.types.chain(&i.name).iter().any(|c| c.name == t)).collect();
+        if family.is_empty() || family.iter().all(|i| has(&i.name)) || family.iter().all(|i| !has(&i.name)) {
+            return (Expr::bool(family.first().map_or(has(&t), |i| has(&i.name))), boolean);
+        }
+        // Else by the instance's type.
+        let ty = if self.is_class(&t) { Expr::Method(Box::new(MethodCall { object: o.clone(), name: "wcb__type".into(), args: vec![] })) } else { Expr::Index(self.types.type_global(&t), Box::new(o.clone())) };
+        let with: Vec<Expr> = family.iter().filter(|i| has(&i.name)).map(|i| Expr::binary(ty.clone(), BinOp::Eq, Expr::int(i.typeid))).collect();
+        let e = with.into_iter().reduce(|a, b| Expr::binary(a, BinOp::Or, b)).expect("some have it");
+        (e, boolean)
     }
 
     /// The type of `e`, when it's a name (a variable, `this`) or a member
@@ -1361,10 +1515,7 @@ impl Cx<'_> {
     fn stmt(&self, s: Stmt, errors: &mut Vec<Error>) -> Stmt {
         match s {
             Stmt::Local { ty, name, array, init, line } => {
-                let init = init.map(|e| {
-                    let (e, t) = self.expr(e, line, errors);
-                    self.coerce(e, t.as_deref(), Some(&ty))
-                });
+                let init = init.map(|e| self.value(e, Some(&ty), line, errors));
                 Stmt::Local { ty, name, array, init, line }
             }
             Stmt::Set { name, index: Some(i), value, line } if self.indexed(&name).is_some_and(|(t, _)| self.has_operator(&t, "[]=")) => {
@@ -1375,8 +1526,7 @@ impl Cx<'_> {
             }
             Stmt::Set { name, index, value, line } => {
                 let index = index.map(|e| self.integer(e, line, errors));
-                let (value, t) = self.expr(value, line, errors);
-                let value = self.coerce(value, t.as_deref(), self.type_of_var(&name).as_deref());
+                let value = self.value(value, self.type_of_var(&name).as_deref(), line, errors);
                 Stmt::Set { name, index, value, line }
             }
             // A cast called for nothing is nothing.
@@ -1386,13 +1536,7 @@ impl Cx<'_> {
             }
             Stmt::Loop { body, line } => Stmt::Loop { body: self.stmts(body, errors), line },
             Stmt::ExitWhen { cond, line } => Stmt::ExitWhen { cond: self.expr(cond, line, errors).0, line },
-            Stmt::Return { value, line } => Stmt::Return {
-                value: value.map(|e| {
-                    let (e, t) = self.expr(e, line, errors);
-                    self.coerce(e, t.as_deref(), self.returns)
-                }),
-                line,
-            },
+            Stmt::Return { value, line } => Stmt::Return { value: value.map(|e| self.value(e, self.returns, line, errors)), line },
             Stmt::Debug { stmt, line } => Stmt::Debug { stmt: Box::new(self.stmt(*stmt, errors)), line },
             Stmt::SetMember { object, name, index, value, line } => {
                 let (value, vt) = self.expr(value, line, errors);
@@ -1490,6 +1634,15 @@ impl Cx<'_> {
                 let t = self.type_of_var(&n);
                 (Expr::Index(n, Box::new(i)), t)
             }
+            // A function interface's pointer where an argument takes one.
+            Expr::Call(Call { name, args })
+                if self.params.get(&name).is_some_and(|w| args.iter().zip(w).any(|(a, t)| self.types.functions.contains_key(t) && matches!(a, Expr::Var(_) | Expr::Member(..)))) =>
+            {
+                let want = self.params[&name].clone();
+                let args = args.into_iter().enumerate().map(|(i, a)| self.value(a, want.get(i).map(String::as_str), line, errors)).collect();
+                let t = self.sigs.get(&name).cloned().flatten();
+                (Expr::Call(Call { name, args }), t)
+            }
             Expr::Call(Call { name, args }) => {
                 let (mut args, have) = self.args(args, line, errors);
                 // A cast: `Data(x)`, `thistype(x)`.
@@ -1523,6 +1676,12 @@ impl Cx<'_> {
             Expr::Member(object, name) if name == "name" && self.function_name(&object).is_some() => {
                 let f = self.function_name(&object).expect("checked");
                 (Expr::string(&f), Some("string".into()))
+            }
+            // `x.m.exists`: does the instance's type declare `m` (not an
+            // interface's `defaults` standing in)?
+            Expr::Member(object, name) if name == "exists" && matches!(&*object, Expr::Member(..)) => {
+                let Expr::Member(o, m) = *object else { unreachable!() };
+                self.exists(*o, &m, line, errors)
             }
             // `a.size` of a sized array: a global's, a member's.
             Expr::Member(object, name) if name == "size" && self.size_of(&object).is_some() => (self.size_of(&object).expect("checked"), Some("integer".into())),
@@ -1724,6 +1883,17 @@ impl Cx<'_> {
             let o = self.coerce(args.remove(0), have[0].as_deref(), Some(&t));
             return self.instance_method(o, t, name, Vec::new(), line, errors);
         }
+        // `I.create(typeid)` of an interface: an instance of its struct of
+        // that type (`s__I__create_by_type`), 0 for none.
+        if let Some(info) = self.struct_named(&object)
+            && info.interface
+            && name == "create"
+            && args.len() == 1
+        {
+            self.created.borrow_mut().insert(info.name.clone());
+            let t = self.coerce(args.remove(0), have[0].as_deref(), Some("integer"));
+            return (call(format!("s__{}__create_by_type", info.name), vec![t]), Some(info.name.clone()));
+        }
         // A struct's own: static.
         if let Some(info) = self.struct_named(&object) {
             let f = match name.as_str() {
@@ -1767,6 +1937,8 @@ impl Cx<'_> {
         // globals (`wcb__fi_I`, `wcb__fx_I`).
         if let Some(i) = t.as_ref().filter(|t| self.types.functions.contains_key(*t)) {
             let returns = self.types.functions[i].returns.clone();
+            let want: Vec<String> = self.types.functions[i].params.iter().map(|p| p.ty.clone()).collect();
+            let mut args = self.coerce_args(args, &have, Some(&want));
             args.insert(0, o);
             let mut runs = self.pointers.runs.borrow_mut();
             let r = runs.entry(i.clone()).or_default();

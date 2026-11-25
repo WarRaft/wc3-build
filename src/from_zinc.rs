@@ -136,11 +136,7 @@ impl Reader<'_> {
             }
             z::Member::Interface(t) => {
                 let (fields, methods, _) = self.members(&t.members);
-                if let Some(f) = fields.first() {
-                    let line = f.origin.line;
-                    self.error(line, "an interface has methods only");
-                }
-                let i = Interface { name: t.name.clone(), owner: self.owner(&t.modifiers), methods, origin: self.origin(t.line) };
+                let i = Interface { name: t.name.clone(), owner: self.owner(&t.modifiers), fields, methods, origin: self.origin(t.line) };
                 self.m.interfaces.push(i);
             }
             z::Member::Module(t) => {

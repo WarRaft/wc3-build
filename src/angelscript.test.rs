@@ -414,3 +414,47 @@ fn an_objects_method_has_no_name() {
     let e = angelscript_vjass("struct V\n    method m takes nothing returns nothing\n    endmethod\nendstruct\nfunction F takes nothing returns nothing\n    call ExecuteFunc(V.m.name)\nendfunction\n").unwrap_err();
     assert!(e.iter().any(|m| m.contains("V.m.name") && m.contains("static method instead")), "{e:?}");
 }
+
+#[test]
+fn interfaces_members_create_pointers_exists() {
+    let out = angelscript_vjass(r#"
+interface withpos
+    real x
+    method msg takes nothing returns string defaults "none"
+endinterface
+struct rectangle extends withpos
+endstruct
+struct circle extends withpos
+    method msg takes nothing returns string
+        return "circle"
+    endmethod
+endstruct
+function interface onIt takes integer x returns nothing
+struct try
+    method BBBB takes nothing returns nothing
+    endmethod
+endstruct
+function test takes nothing returns nothing
+    local withpos w = withpos.create(circle.typeid)
+    local onIt each = try.BBBB
+    set w.x = 2.
+    call each.evaluate(try.create())
+    if w.msg.exists then
+        call BJDebugMsg("yes")
+    endif
+endfunction
+"#)
+    .unwrap_or_else(|e| panic!("{e:?}"));
+    for part in [
+        // The interface's members are its class's.
+        "class withpos {\n    int wcb__id = 0;\n    float x = 0.0f;\n",
+        "withpos@ s__withpos__create_by_type(int t) {\n    if (t == 1) {\n        return s__rectangle__allocate();\n    }\n    if (t == 2) {\n        return s__circle__allocate();\n    }\n    return null;\n}",
+        // An object's method as a pointer: a function taking its number.
+        // `try` is a word of AngelScript's: the class is `wcb__try`.
+        "class wcb__try {",
+        "void wcb__p_try_BBBB(int wcb__i) {\n    cast<wcb__try>(s__try__at(wcb__i)).BBBB();\n}",
+        "    withpos@ w = s__withpos__create_by_type(2);\n    int each = 1;\n    w.x = 2.0f;\n    wcb__fi_onIt(each, s__try__id(s__try__allocate()));\n    if (w.wcb__type() == 2) {\n",
+    ] {
+        assert!(out.contains(part), "{part}\nnot in:\n{out}");
+    }
+}

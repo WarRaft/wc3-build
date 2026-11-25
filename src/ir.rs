@@ -156,6 +156,8 @@ pub struct Method {
 pub struct Interface {
     pub name: String,
     pub owner: Owner,
+    /// Its members: every struct extending it has them, as a parent's.
+    pub fields: Vec<Field>,
     pub methods: Vec<Method>,
     pub origin: Origin,
 }

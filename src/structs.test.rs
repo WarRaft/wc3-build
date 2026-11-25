@@ -726,3 +726,75 @@ endfunction
     assert_eq!(e.len(), 1, "{e:?}");
     assert!(e[0].contains("the global b's initial value uses a struct"), "{e:?}");
 }
+
+#[test]
+fn the_manuals_interfaces_and_pointers() {
+    let out = build(&[(
+        "t.j",
+        r#"// @dialect vjass
+interface withpos
+    real x
+    real y = 1.
+    method msg takes nothing returns string defaults "none"
+endinterface
+struct rectangle extends withpos
+    real a
+endstruct
+struct circle extends withpos
+    real radius = 67.0
+    static method create takes nothing returns circle
+        local circle c = circle.allocate()
+        set c.x = 5.
+        return c
+    endmethod
+    method msg takes nothing returns string
+        return "circle"
+    endmethod
+endstruct
+function distance takes withpos A, withpos B returns real
+    return A.x - B.x + A.y
+endfunction
+function interface realfunc takes real x returns real
+function interface myFunc takes integer a, integer b returns nothing
+function interface onIt takes integer x returns nothing
+function double takes real x returns real
+    return 2 * x
+endfunction
+function repeater3 takes real x, realfunc F returns real
+    return F.evaluate(F.evaluate(F.evaluate(x)))
+endfunction
+struct try
+    static method AAAA takes integer a, integer b returns nothing
+    endmethod
+    method BBBB takes nothing returns nothing
+    endmethod
+endstruct
+function test takes nothing returns nothing
+    local withpos w = withpos.create(circle.typeid)
+    local real r = repeater3(2.0, double)
+    local myFunc fun = try.AAAA
+    local onIt each = try.BBBB
+    call fun.evaluate(5, 6)
+    call each.evaluate(try.create())
+    if w.msg.exists then
+        call BJDebugMsg("yes")
+    endif
+endfunction
+"#,
+    )])
+    .unwrap();
+    // An interface's members: a parent's, its default set by each struct's allocator.
+    assert!(out.contains("real array s__withpos_x") && out.contains("real array s__withpos_y"), "{out}");
+    assert!(out.contains("return s__withpos_x[A] - s__withpos_x[B] + s__withpos_y[A]"), "{out}");
+    assert!(out.contains("set s__withpos_y[this] = 1."), "{out}");
+    // I.create(typeid): its create taking nothing, else its allocator; else 0.
+    assert!(out.contains("function s__withpos__create_by_type takes integer t returns integer\nif t == 1 then\nreturn s__rectangle__allocate()\nendif\nif t == 2 then\nreturn s__circle_create()\nendif\nreturn 0\nendfunction"), "{out}");
+    assert!(out.contains("local integer w = s__withpos__create_by_type(2)"), "{out}");
+    // A function, a static method, a method of an instance (taking it first) as pointers.
+    assert!(out.contains("local real r = repeater3(2.0, 1)"), "{out}");
+    assert!(out.contains("local integer fun = 1\n") && out.contains("local integer each = 1\n"), "{out}");
+    assert!(out.contains("call s__try_AAAA(wcb__fia_myFunc_0, wcb__fia_myFunc_1)"), "{out}");
+    assert!(out.contains("call s__try_BBBB(wcb__fia_onIt_0)"), "{out}");
+    // `.exists`: rectangle has msg from the defaults only, circle its own.
+    assert!(out.contains("if si__withpos_type[w] == 2 then"), "{out}");
+}

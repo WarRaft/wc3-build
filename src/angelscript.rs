@@ -93,7 +93,7 @@ fn ty(t: &str) -> String {
         "code" => "CallbackFunc@".into(),
         BOOL_CODE => "BoolexprFunc@".into(),
         _ => match t.strip_prefix(CLASS) {
-            Some(c) => format!("{c}@"),
+            Some(c) => format!("{}@", ident(c)),
             None => t.into(),
         },
     }
@@ -189,6 +189,7 @@ fn mark_classes(m: &mut Module) {
         st.methods.iter_mut().for_each(|me| function(&mut me.function));
     }
     for i in &mut m.interfaces {
+        i.fields.iter_mut().for_each(|f| mark(&mut f.ty));
         i.methods.iter_mut().for_each(|me| function(&mut me.function));
     }
 }
@@ -510,6 +511,9 @@ pub fn print(m: &Module, game: &[Signature], common: &Common) -> String {
         }
     }
     for i in &m.interfaces {
+        for f in i.fields.iter().filter(|f| !f.is_static) {
+            p.fields.insert((i.name.clone(), f.name.clone()), f.ty.clone());
+        }
         for me in &i.methods {
             p.methods.insert((i.name.clone(), me.function.sig.name.clone()), me.function.sig.returns.clone());
         }
@@ -638,22 +642,23 @@ fn literal(t: &str) -> String {
 /// `s__R__at`, `s__R__id`, `s__R__add`, `s__R__deallocate`,
 /// `s__R__destroy` (its `onDestroy`s, then given back).
 fn family(r: &str) -> String {
+    let c = ident(r);
     format!(
         "
-array<{r}@> si__{r}_all = {{null}};
+array<{c}@> si__{r}_all = {{null}};
 array<int> si__{r}_free;
 
-{r}@ s__{r}__at(int i) {{
+{c}@ s__{r}__at(int i) {{
     if (i <= 0 || uint(i) >= si__{r}_all.length()) return null;
     return si__{r}_all[i];
 }}
 
-int s__{r}__id({r}@ o) {{
+int s__{r}__id({c}@ o) {{
     if (o is null) return 0;
     return o.wcb__id;
 }}
 
-void s__{r}__add({r}@ o) {{
+void s__{r}__add({c}@ o) {{
     if (si__{r}_free.length() > 0) {{
         o.wcb__id = si__{r}_free[si__{r}_free.length() - 1];
         si__{r}_free.removeLast();
@@ -664,14 +669,14 @@ void s__{r}__add({r}@ o) {{
     }}
 }}
 
-void s__{r}__deallocate({r}@ o) {{
+void s__{r}__deallocate({c}@ o) {{
     if (o is null || o.wcb__id == 0) return;
     @si__{r}_all[o.wcb__id] = null;
     si__{r}_free.insertLast(o.wcb__id);
     o.wcb__id = 0;
 }}
 
-void s__{r}__destroy({r}@ o) {{
+void s__{r}__destroy({c}@ o) {{
     if (o is null || o.wcb__id == 0) return;
     o.wcb__onDestroy();
     s__{r}__deallocate(o);
@@ -734,7 +739,11 @@ impl Printer<'_> {
             if interfaces.contains(root) || list.len() > 1 { list.iter().position(|s| s == name).map_or(0, |k| k + 1) } else { 0 }
         };
         for i in &m.interfaces {
-            let _ = writeln!(out, "\nclass {} {{\n    int wcb__id = 0;\n    int wcb__type() {{ return 0; }}\n    void wcb__onDestroy() {{}}", i.name);
+            let _ = writeln!(out, "\nclass {} {{\n    int wcb__id = 0;", ident(&i.name));
+            // Its members, every struct extending it has.
+            self.types.locals = HashMap::new();
+            self.fields_of(&i.fields, &mut out);
+            out.push_str("    int wcb__type() { return 0; }\n    void wcb__onDestroy() {}\n");
             for me in &i.methods {
                 let f = &me.function;
                 self.types.locals = f.sig.params.iter().map(|x| (x.name.clone(), x.ty.clone())).collect();
@@ -755,29 +764,21 @@ impl Printer<'_> {
             let parent = self.parents.get(&st.name).cloned();
             match &parent {
                 Some(p) => {
-                    let _ = writeln!(out, "\nclass {} : {p} {{", st.name);
+                    let _ = writeln!(out, "\nclass {} : {} {{", ident(&st.name), ident(p));
                 }
                 None => {
-                    let _ = writeln!(out, "\nclass {} {{\n    int wcb__id = 0;", st.name);
+                    let _ = writeln!(out, "\nclass {} {{\n    int wcb__id = 0;", ident(&st.name));
                 }
             }
             self.types.locals = HashMap::new();
-            for f in st.fields.iter().filter(|f| !f.is_static) {
-                if f.array.is_some() {
-                    self.arrays.insert(f.ty.clone());
-                    let _ = writeln!(out, "    WC3::{} {};", array_class(&f.ty), ident(&f.name));
-                } else {
-                    let value = f.init.as_ref().map_or_else(|| empty(&f.ty).to_string(), |e| self.value(e, Some(&f.ty)));
-                    let _ = writeln!(out, "    {} {} = {value};", ty(&f.ty), ident(&f.name));
-                }
-            }
+            self.fields_of(&st.fields, &mut out);
             let _ = writeln!(out, "    int wcb__type() {{ return {}; }}", typeid(&st.name, &root));
             // `onDestroy`: its own, then its parents'.
             let own = format!("onDestroy__{}", st.name);
             let has_own = st.methods.iter().any(|me| me.function.sig.name == own);
             match (has_own, &parent) {
                 (true, Some(p)) => {
-                    let _ = writeln!(out, "    void wcb__onDestroy() {{\n        {own}();\n        {p}::wcb__onDestroy();\n    }}");
+                    let _ = writeln!(out, "    void wcb__onDestroy() {{\n        {own}();\n        {}::wcb__onDestroy();\n    }}", ident(p));
                 }
                 (true, None) => {
                     let _ = writeln!(out, "    void wcb__onDestroy() {{\n        {own}();\n    }}");
@@ -801,9 +802,22 @@ impl Printer<'_> {
             // of it): the object itself is `s__S__new`.
             let via = m.functions.iter().any(|f| f.sig.name == format!("s__{}__allocate", st.name));
             let name = if via { "new" } else { "allocate" };
-            let _ = writeln!(out, "\n{0}@ s__{0}__{name}() {{\n    {0}@ o = {0}();\n    s__{r}__add(o);\n    return o;\n}}", st.name);
+            let _ = writeln!(out, "\n{1}@ s__{0}__{name}() {{\n    {1}@ o = {1}();\n    s__{r}__add(o);\n    return o;\n}}", st.name, ident(&st.name));
         }
         out
+    }
+
+    /// A class's instance members, with their values.
+    fn fields_of(&mut self, fields: &[Field], out: &mut String) {
+        for f in fields.iter().filter(|f| !f.is_static) {
+            if f.array.is_some() {
+                self.arrays.insert(f.ty.clone());
+                let _ = writeln!(out, "    WC3::{} {};", array_class(&f.ty), ident(&f.name));
+            } else {
+                let value = f.init.as_ref().map_or_else(|| empty(&f.ty).to_string(), |e| self.value(e, Some(&f.ty)));
+                let _ = writeln!(out, "    {} {} = {value};", ty(&f.ty), ident(&f.name));
+            }
+        }
     }
 
     /// The type of an object written (`a`, `a.b`, `a.m()`, `S(x)`): its
@@ -871,12 +885,12 @@ impl Printer<'_> {
             return "null".into();
         }
         if let Some(t) = c.name.strip_prefix("wcb__cast__") {
-            return format!("cast<{t}>({})", c.args.first().map_or(String::new(), |a| self.expr(a, 0)));
+            return format!("cast<{}>({})", ident(t), c.args.first().map_or(String::new(), |a| self.expr(a, 0)));
         }
         // `super.m(...)`: the parent's, `P::m(...)`.
         if let Some((class, m)) = c.name.split_once("::") {
             let args: Vec<String> = c.args.iter().map(|a| self.value(a, None)).collect();
-            return format!("{class}::{}({})", ident(m), args.join(", "));
+            return format!("{}::{}({})", ident(class), ident(m), args.join(", "));
         }
         let name = if self.common.natives.contains_key(&c.name) { format!("Jass::{}", c.name) } else { ident(&c.name) };
         let params = self.params.get(c.name.as_str());

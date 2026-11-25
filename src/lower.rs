@@ -227,6 +227,13 @@ pub fn lower_for(m: &Module, game: &[Signature], classes: bool) -> Result<Module
         let scope = i.owner.scope.clone();
         let r = |n: &str| resolve(scope.as_deref(), n);
         i.name = r(&i.name);
+        for f in &mut i.fields {
+            f.ty = r(&f.ty);
+            if let Some(e) = &mut f.init {
+                names_in_expr(e, &r, &HashSet::new(), &ftypes);
+                modulo(e);
+            }
+        }
         for me in &mut i.methods {
             for p in &mut me.function.sig.params {
                 p.ty = r(&p.ty);
