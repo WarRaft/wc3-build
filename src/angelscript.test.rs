@@ -138,3 +138,176 @@ fn it_needs_common_j() {
     let e = build_with(&m, &Options { script: Script::AngelScript, ..Default::default() }).unwrap_err();
     assert!(e[0].message.contains("common.j"), "{e:?}");
 }
+
+/// What a hashtable takes, for structs kept as numbers.
+const HASHTABLE: &str = "\
+type hashtable extends agent
+native InitHashtable takes nothing returns hashtable
+native SaveInteger takes hashtable table, integer parentKey, integer childKey, integer value returns nothing
+native LoadInteger takes hashtable table, integer parentKey, integer childKey returns integer
+";
+
+fn angelscript_vjass(text: &str) -> Result<String, Vec<String>> {
+    let m = crate::from_jass::module_as(&[Source { name: "t.j", text }], jass_rs::Dialect::VJass).unwrap_or_else(|e| panic!("{e:?}"));
+    let common = format!("{}{HASHTABLE}", crate::structs::tests::COMMON);
+    let game = crate::from_jass::signatures(&common);
+    let options = Options { script: Script::AngelScript, game, common_j: common, ..Default::default() };
+    let out = build_with(&m, &options).map_err(|e| e.into_iter().map(|e| e.message).collect::<Vec<_>>())?.script;
+    if let Err(e) = as_rs::parse(&out) {
+        panic!("line {}: {}\n{out}", e.line, e.message);
+    }
+    Ok(out)
+}
+
+#[test]
+fn structs_as_classes() {
+    let out = angelscript_vjass(r#"
+interface Shape
+    method area takes nothing returns real
+    method name takes nothing returns string defaults "shape"
+endinterface
+struct Square extends Shape
+    real side = 1.
+    method area takes nothing returns real
+        return this.side * this.side
+    endmethod
+endstruct
+struct Node
+    static integer count = 0
+    Node next
+    integer value
+    integer array marks[4]
+    static method create takes integer v returns thistype
+        local thistype c = thistype.allocate()
+        set c.value = v
+        set c.next = 0
+        set thistype.count = thistype.count + 1
+        set c.marks[2] = v
+        return c
+    endmethod
+    method onDestroy takes nothing returns nothing
+        set thistype.count = thistype.count - 1
+    endmethod
+    stub method describe takes nothing returns string
+        return "node"
+    endmethod
+endstruct
+struct Leaf extends Node
+    method describe takes nothing returns string
+        return "leaf " + super.describe()
+    endmethod
+endstruct
+globals
+    hashtable ht = InitHashtable()
+endglobals
+function Use takes nothing returns nothing
+    local Node n = Node.create(5)
+    local Node m
+    local Shape s = Square.create()
+    local real a = s.area()
+    set n.next = Leaf.allocate()
+    call SaveInteger(ht, 0, 0, n)
+    set m = Node(LoadInteger(ht, 0, 0))
+    if m == n and m.next != 0 then
+        call BJDebugMsg(m.next.describe() + I2S(m.getType()) + I2S(Leaf.typeid))
+    endif
+    call BJDebugMsg(s.name())
+    call m.destroy()
+endfunction
+"#)
+    .unwrap_or_else(|e| panic!("{e:?}"));
+    for part in [
+        // An interface: a class with what a struct without a method gives.
+        "class Shape {\n    int wcb__id = 0;\n    int wcb__type() { return 0; }\n    void wcb__onDestroy() {}\n    float area() { return 0.0f; }\n    string name() { return \"shape\"; }\n}",
+        "class Square : Shape {\n    float side = 1.0f;\n    int wcb__type() { return 1; }\n    float area() {\n        return this.side * this.side;\n    }\n}",
+        "class Node {\n    int wcb__id = 0;\n    Node@ next = null;\n    int value = 0;\n    WC3::int_array marks;\n    int wcb__type() { return 1; }\n    void wcb__onDestroy() {\n        onDestroy__Node();\n    }\n",
+        "    void onDestroy__Node() {\n        s__Node_count = s__Node_count - 1;\n    }\n",
+        "class Leaf : Node {\n    int wcb__type() { return 2; }\n    string describe() {\n        return \"leaf \" + Node::describe();\n    }\n}",
+        // Static members: globals and functions.
+        "int s__Node_count = 0;",
+        "Node@ s__Node_create(int v) {\n    Node@ c = s__Node__allocate();\n    c.value = v;\n    @c.next = null;\n    s__Node_count = s__Node_count + 1;\n    c.marks[2] = v;\n    return c;\n}",
+        "Node@ s__Node__allocate() {\n    Node@ o = Node();\n    s__Node__add(o);\n    return o;\n}",
+        "Leaf@ s__Leaf__allocate() {\n    Leaf@ o = Leaf();\n    s__Node__add(o);\n    return o;\n}",
+        "array<Shape@> si__Shape_all = {null};",
+        // Objects and their numbers.
+        "    Node@ n = s__Node_create(5);\n    Node@ m = null;\n    Shape@ s = s__Square__allocate();\n    float a = s.area();\n",
+        "    @n.next = s__Leaf__allocate();\n    Jass::SaveInteger(ht, 0, 0, s__Node__id(n));\n    @m = cast<Node>(s__Node__at(Jass::LoadInteger(ht, 0, 0)));\n    if (m is n && !(m.next is null)) {\n        Jass::BJDebugMsg(m.next.describe() + Jass::I2S(m.wcb__type()) + Jass::I2S(2));\n    }\n    Jass::BJDebugMsg(s.name());\n    s__Node__destroy(m);\n",
+    ] {
+        assert!(out.contains(part), "{part}\nnot in:\n{out}");
+    }
+}
+
+#[test]
+fn instance_zero_is_no_object() {
+    let e = angelscript_vjass("struct L\n    L next\n    static method f takes nothing returns L\n        return thistype(0).next\n    endmethod\nendstruct\n").unwrap_err();
+    assert!(e.iter().any(|e| e.contains("instance 0")), "{e:?}");
+}
+
+#[test]
+fn the_rest_of_vjass_as_classes() {
+    let out = angelscript_vjass(r#"
+function interface Op takes integer a returns integer
+function Twice takes integer a returns integer
+    return a * 2
+endfunction
+module Counted
+    static integer made = 0
+    static method onInit takes nothing returns nothing
+        set thistype.made = 0
+    endmethod
+endmodule
+struct Vec
+    implement Counted
+    real x
+    method operator length takes nothing returns real
+        return this.x
+    endmethod
+    method operator length= takes real v returns nothing
+        set this.x = v
+    endmethod
+    method operator [] takes integer i returns real
+        return this.x * i
+    endmethod
+    method operator < takes Vec other returns boolean
+        return this.x < other.x
+    endmethod
+    method scale takes real k returns nothing
+        set this.x = this.x * k
+    endmethod
+    static method tick takes nothing returns nothing
+    endmethod
+endstruct
+struct Holder
+    delegate Vec v
+endstruct
+function Use takes nothing returns nothing
+    local Vec a = Vec.create()
+    local Vec b = Vec.create()
+    local Holder h = Holder.create()
+    local Op f = Op.Twice
+    set h.v = a
+    set a.length = 2.
+    call h.scale(3.)
+    if a < b and a[2] > 1. then
+        call BJDebugMsg(I2S(f.evaluate(4)))
+    endif
+    call a.scale.evaluate(2.)
+    call Vec.tick.execute()
+endfunction
+"#)
+    .unwrap_or_else(|e| panic!("{e:?}"));
+    for part in [
+        "    float wcb__get_length() {\n        return this.x;\n    }",
+        "    void wcb__set_length(float v) {\n        this.x = v;\n    }",
+        "    a.wcb__set_length(2.0f);\n    h.v.scale(3.0f);\n    if (a.wcb__lt(b) && a.wcb__getindex(2) > 1.0f) {\n        Jass::BJDebugMsg(Jass::I2S(wcb__fi_Op(f, 4)));\n    }\n    a.scale(2.0f);\n    wcb__exec_s__Vec_tick();\n",
+        "@h.v = a;",
+        "int s__Vec_made = 0;",
+        "Jass::ExecuteFunc(\"s__Vec_onInit__Counted\")",
+        "void wcb__exec_s__Vec_tick() {",
+    ] {
+        assert!(out.contains(part), "{part}\nnot in:\n{out}");
+    }
+    // An object's method in a thread of its own: not yet.
+    let e = angelscript_vjass("struct V\n    method m takes nothing returns nothing\n    endmethod\nendstruct\nfunction F takes V v returns nothing\n    call v.m.execute()\nendfunction\n").unwrap_err();
+    assert!(e.iter().any(|e| e.contains("execute")), "{e:?}");
+}

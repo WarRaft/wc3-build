@@ -641,15 +641,21 @@ impl Module {
     /// What of vJASS and Zinc the module still has, which only lowering
     /// (the build's stage 4) turns into the game's JASS: an error each.
     pub fn not_lowered(&self) -> Vec<Error> {
+        self.not_lowered_with(false)
+    }
+
+    /// [`Module::not_lowered`]; with `classes` (AngelScript's) structs,
+    /// interfaces and their members are kept, not errors.
+    pub fn not_lowered_with(&self, classes: bool) -> Vec<Error> {
         let mut out = Vec::new();
         let mut push = |origin: &Origin, what: String| out.push(Error { origin: origin.clone(), message: format!("{what} isn't built into JASS yet") });
         for l in &self.libraries {
             push(&l.origin, format!("{} {}", if l.scope { "scope" } else { "library" }, l.name));
         }
-        for s in &self.structs {
+        for s in self.structs.iter().filter(|_| !classes) {
             push(&s.origin, format!("struct {}", s.name));
         }
-        for i in &self.interfaces {
+        for i in self.interfaces.iter().filter(|_| !classes) {
             push(&i.origin, format!("interface {}", i.name));
         }
         for x in &self.mixins {
@@ -667,28 +673,28 @@ impl Module {
         for f in &self.functions {
             let mut what = None;
             each_expr(&f.body, &mut |e| match e {
-                Expr::Member(..) | Expr::Method(_) | Expr::Element(..) => what = what.take().or(Some("a member (`a.b`)")),
+                Expr::Member(..) | Expr::Method(_) | Expr::Element(..) if !classes => what = what.take().or(Some("a member (`a.b`)")),
                 Expr::Binary(_, BinOp::Mod, _) => what = what.take().or(Some("`%`")),
                 _ => {}
             });
-            fn statements(body: &[Stmt], what: &mut Option<&'static str>) {
+            fn statements(body: &[Stmt], what: &mut Option<&'static str>, classes: bool) {
                 for s in body {
                     match s {
-                        Stmt::SetMember { .. } | Stmt::CallMethod { .. } => *what = what.take().or(Some("a member (`a.b`)")),
+                        Stmt::SetMember { .. } | Stmt::CallMethod { .. } if !classes => *what = what.take().or(Some("a member (`a.b`)")),
                         Stmt::StaticIf { .. } => *what = what.take().or(Some("`static if`")),
                         Stmt::If { branches, otherwise, .. } => {
-                            branches.iter().for_each(|(_, b)| statements(b, what));
+                            branches.iter().for_each(|(_, b)| statements(b, what, classes));
                             if let Some(b) = otherwise {
-                                statements(b, what);
+                                statements(b, what, classes);
                             }
                         }
-                        Stmt::Loop { body, .. } => statements(body, what),
-                        Stmt::Debug { stmt, .. } => statements(std::slice::from_ref(stmt), what),
+                        Stmt::Loop { body, .. } => statements(body, what, classes),
+                        Stmt::Debug { stmt, .. } => statements(std::slice::from_ref(stmt), what, classes),
                         _ => {}
                     }
                 }
             }
-            statements(&f.body, &mut what);
+            statements(&f.body, &mut what, classes);
             if let Some(w) = what {
                 push(&f.origin, format!("{w} in {}", f.sig.name));
             }

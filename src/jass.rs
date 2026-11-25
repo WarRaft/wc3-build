@@ -31,6 +31,9 @@ use std::fmt::Write as _;
 
 use crate::ir::*;
 
+/// What a class's method is named while looked into with the functions.
+const METHOD_MARK: &str = "\u{0}method";
+
 /// The prefix of every name the build makes.
 pub const PREFIX: &str = "wcb__";
 
@@ -105,8 +108,9 @@ pub fn build_with(m: &Module, options: &Options) -> Result<Built, Vec<Error>> {
         Script::AngelScript => Some(game_scripts(options)?),
         _ => None,
     };
-    let m = crate::lower::lower_with(m, &options.game)?;
-    let errors = m.not_lowered();
+    let classes = angelscript.is_some();
+    let m = crate::lower::lower_for(m, &options.game, classes)?;
+    let errors = m.not_lowered_with(classes);
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -126,13 +130,21 @@ pub fn build_with(m: &Module, options: &Options) -> Result<Built, Vec<Error>> {
         body.append(&mut main.body);
         main.body = body;
     }
-    if angelscript.is_some() {
-        // AngelScript calls a function wherever it is: nothing to sort.
-        m.functions = std::mem::take(&mut m.functions).into_iter().map(hoist_locals).collect();
+    if classes {
+        // AngelScript calls a function wherever it is: nothing to sort;
+        // `.evaluate` and `.execute` through triggers still (the classes'
+        // methods' too, looked into as functions of their own).
+        let mut functions = std::mem::take(&mut m.functions);
+        for st in &m.structs {
+            functions.extend(st.methods.iter().map(|me| Function { sig: Signature { name: METHOD_MARK.into(), params: Vec::new(), returns: None, constant: false }, ..me.function.clone() }));
+        }
+        let (functions, globals) = evaluate_forward_calls(functions, true);
+        m.globals.extend(globals);
+        m.functions = functions.into_iter().filter(|f| f.sig.name != METHOD_MARK).map(hoist_locals).collect();
     } else {
         let order = sort_functions(&m);
         let functions: Vec<Function> = order.into_iter().map(|i| m.functions[i].clone()).collect();
-        let (functions, globals) = evaluate_forward_calls(functions);
+        let (functions, globals) = evaluate_forward_calls(functions, false);
         m.globals.extend(globals);
         m.functions = functions.into_iter().map(hoist_locals).collect();
     }
@@ -451,7 +463,10 @@ fn sort_functions(m: &Module) -> Vec<usize> {
 /// Every call (or code value) of a function below the caller goes
 /// through that function's trigger (see the module docs): the functions
 /// with what that takes added, and the globals it needs.
-fn evaluate_forward_calls(functions: Vec<Function>) -> (Vec<Function>, Vec<Global>) {
+///
+/// `explicit_only` (AngelScript's, which calls a function wherever it is):
+/// only lowering's `.evaluate` and `.execute` go through triggers.
+fn evaluate_forward_calls(functions: Vec<Function>, explicit_only: bool) -> (Vec<Function>, Vec<Global>) {
     let at: HashMap<String, usize> = functions.iter().enumerate().map(|(i, f)| (f.sig.name.clone(), i)).collect();
     let mut forward: Vec<usize> = Vec::new();
     // Run in a thread of their own (`wcb__exec_F`, `.execute`).
@@ -475,6 +490,7 @@ fn evaluate_forward_calls(functions: Vec<Function>) -> (Vec<Function>, Vec<Globa
                 continue;
             }
             if let Some(&j) = at.get(&c)
+                && !explicit_only
                 && j > i
                 && !forward.contains(&j)
             {
@@ -580,7 +596,7 @@ fn evaluate_forward_calls(functions: Vec<Function>) -> (Vec<Function>, Vec<Globa
     for (i, mut f) in functions.into_iter().enumerate() {
         let below: HashMap<String, String> =
             names.iter().filter(|(n, _)| at[n.as_str()] > i).map(|(n, c)| (n.clone(), c.clone())).collect();
-        if !below.is_empty() {
+        if !below.is_empty() && !explicit_only {
             retarget(&mut f.body, &below);
         }
         if is_entry(&f) {

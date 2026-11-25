@@ -25,6 +25,11 @@
 //!   uses, and what they use, are taken ([`take_used`]) and written here
 //!   too.
 //!
+//! - a struct is a class, an interface a base class, an object a handle
+//!   (`S@`): see [`crate::structs::lower`] for what lowering keeps, and
+//!   `Printer::classes` for what's written of them (the families'
+//!   tables of objects by number, each struct's `s__S__allocate`).
+//!
 //! What JASS has that AngelScript writes otherwise:
 //!
 //! - an array is a JASS one, any index read and what's never set its
@@ -57,7 +62,7 @@ pub struct Common {
 }
 
 impl Common {
-    /// Of `common.j`'s module; the code's own natives are added by [`print`].
+    /// Of `common.j`'s module; the code's own natives are added by [`print()`].
     pub fn of(m: &Module) -> Common {
         Common {
             natives: m.natives.iter().map(|n| (n.sig.name.clone(), n.sig.clone())).collect(),
@@ -87,7 +92,10 @@ fn ty(t: &str) -> String {
         "boolean" => "bool".into(),
         "code" => "CallbackFunc@".into(),
         BOOL_CODE => "BoolexprFunc@".into(),
-        _ => t.into(),
+        _ => match t.strip_prefix(CLASS) {
+            Some(c) => format!("{c}@"),
+            None => t.into(),
+        },
     }
 }
 
@@ -99,6 +107,7 @@ fn empty(t: &str) -> &'static str {
         "boolean" => "false",
         "string" => "\"\"",
         "code" | BOOL_CODE => "null",
+        _ if t.starts_with(CLASS) => "null",
         _ => "nil",
     }
 }
@@ -113,7 +122,7 @@ fn array_classes(types: &BTreeSet<String>) -> String {
     let mut out = String::from("namespace WC3 {\n");
     for t in types {
         let (class, elem, empty) = (array_class(t), ty(t), empty(t));
-        let at = if is_code(t) { "@" } else { "" };
+        let at = if is_code(t) || t.starts_with(CLASS) { "@" } else { "" };
         let _ = write!(
             out,
             "    // A JASS array: any index read, what's never set {empty}.
@@ -134,6 +143,54 @@ fn array_classes(types: &BTreeSet<String>) -> String {
     }
     out += "}\n";
     out
+}
+
+/// What a class's type is marked with ([`mark_classes`]): `class:S`.
+const CLASS: &str = "class:";
+
+/// Marks every type that's a class's (a struct's or an interface's)
+/// [`CLASS`], wherever a type is written.
+fn mark_classes(m: &mut Module) {
+    let classes: HashSet<String> = m.structs.iter().map(|s| s.name.clone()).chain(m.interfaces.iter().map(|i| i.name.clone())).collect();
+    if classes.is_empty() {
+        return;
+    }
+    let mark = |t: &mut String| {
+        if classes.contains(t.as_str()) {
+            *t = format!("{CLASS}{t}");
+        }
+    };
+    fn body(b: &mut [Stmt], mark: &dyn Fn(&mut String)) {
+        for s in b {
+            match s {
+                Stmt::Local { ty, .. } => mark(ty),
+                Stmt::If { branches, otherwise, .. } => {
+                    branches.iter_mut().for_each(|(_, b)| body(b, mark));
+                    if let Some(b) = otherwise {
+                        body(b, mark);
+                    }
+                }
+                Stmt::Loop { body: b, .. } => body(b, mark),
+                _ => {}
+            }
+        }
+    }
+    let function = |f: &mut Function| {
+        f.sig.params.iter_mut().for_each(|p| mark(&mut p.ty));
+        if let Some(r) = &mut f.sig.returns {
+            mark(r);
+        }
+        body(&mut f.body, &mark);
+    };
+    m.globals.iter_mut().for_each(|g| mark(&mut g.ty));
+    m.functions.iter_mut().for_each(function);
+    for st in &mut m.structs {
+        st.fields.iter_mut().for_each(|f| mark(&mut f.ty));
+        st.methods.iter_mut().for_each(|me| function(&mut me.function));
+    }
+    for i in &mut m.interfaces {
+        i.methods.iter_mut().for_each(|me| function(&mut me.function));
+    }
 }
 
 /// The type of a `code` that's a `BoolexprFunc` ([`bool_code`]).
@@ -171,8 +228,8 @@ fn each_call(body: &[Stmt], f: &mut impl FnMut(&Call)) {
     }
 }
 
-/// Makes [`BOOL_CODE`] every `code` global, parameter and local passed
-/// to what takes a `BoolexprFunc` (a native of [`BOOL_SLOTS`], or a
+/// Makes `code:bool` every `code` global, parameter and local passed
+/// to what takes a `BoolexprFunc` (`Condition`, `Filter`, or a
 /// parameter made one), until nothing more is.
 pub fn bool_code(m: &mut Module) {
     fn retype(body: &mut [Stmt], name: &str) -> bool {
@@ -281,6 +338,10 @@ pub fn take_used(m: &mut Module, from: &Module) {
     let mut queue = Vec::new();
     m.functions.iter().for_each(|f| names_in(&f.body, &mut queue));
     m.globals.iter().for_each(|g| names_in_global(g, &mut queue));
+    for st in &m.structs {
+        st.methods.iter().for_each(|me| names_in(&me.function.body, &mut queue));
+        st.fields.iter().filter_map(|f| f.init.clone()).for_each(|e| names_in(&[Stmt::Return { value: Some(e), line: 0 }], &mut queue));
+    }
     let (mut fs, mut gs) = (BTreeSet::new(), BTreeSet::new());
     while let Some(n) = queue.pop() {
         if known.contains(&n) {
@@ -310,9 +371,17 @@ struct Printer<'a> {
     returns: Option<&'a str>,
     /// The module's globals (taken from `Blizzard.j` too).
     globals: HashSet<&'a str>,
+    /// What the class's method printed gives back.
+    method_returns: Option<String>,
     arrays: BTreeSet<String>,
     /// Functions given where they don't fit: `(F, as a BoolexprFunc)`.
     wrappers: std::cell::RefCell<BTreeSet<(String, bool)>>,
+    /// The classes: each one's parent, fields' types, methods' returns.
+    parents: HashMap<String, String>,
+    fields: HashMap<(String, String), String>,
+    methods: HashMap<(String, String), Option<String>>,
+    /// In a class's method: `this` is `this`.
+    in_class: bool,
 }
 
 /// The AngelScript of `m` (made the game's JASS: lowered, merged, what it
@@ -321,6 +390,7 @@ struct Printer<'a> {
 pub fn print(m: &Module, game: &[Signature], common: &Common) -> String {
     let mut m = m.clone();
     bool_code(&mut m);
+    mark_classes(&mut m);
     let m = &m;
     let mut common = common.clone();
     for n in BOOL_SLOTS {
@@ -331,7 +401,32 @@ pub fn print(m: &Module, game: &[Signature], common: &Common) -> String {
     for n in &m.natives {
         common.natives.insert(n.sig.name.clone(), n.sig.clone());
     }
-    let mut p = Printer { types: Types { globals: HashMap::new(), returns: HashMap::new(), locals: HashMap::new() }, common: &common, params: HashMap::new(), returns: None, arrays: BTreeSet::new(), wrappers: Default::default(), globals: m.globals.iter().map(|g| g.name.as_str()).collect() };
+    let mut p = Printer { types: Types { globals: HashMap::new(), returns: HashMap::new(), locals: HashMap::new() }, common: &common, params: HashMap::new(), returns: None,
+        arrays: BTreeSet::new(),
+        wrappers: Default::default(),
+        globals: m.globals.iter().map(|g| g.name.as_str()).collect(),
+        parents: HashMap::new(),
+        fields: HashMap::new(),
+        methods: HashMap::new(),
+        in_class: false,
+        method_returns: None,
+    };
+    for st in &m.structs {
+        if let Some(e) = st.extends.as_ref().filter(|e| *e != "array") {
+            p.parents.insert(st.name.clone(), e.clone());
+        }
+        for f in st.fields.iter().filter(|f| !f.is_static) {
+            p.fields.insert((st.name.clone(), f.name.clone()), f.ty.clone());
+        }
+        for me in &st.methods {
+            p.methods.insert((st.name.clone(), me.function.sig.name.clone()), me.function.sig.returns.clone());
+        }
+    }
+    for i in &m.interfaces {
+        for me in &i.methods {
+            p.methods.insert((i.name.clone(), me.function.sig.name.clone()), me.function.sig.returns.clone());
+        }
+    }
     for (name, t) in &common.globals {
         p.types.globals.insert(name, t);
     }
@@ -365,6 +460,8 @@ pub fn print(m: &Module, game: &[Signature], common: &Common) -> String {
         p.statements(&f.body, 1, &mut body);
         body += "}\n";
     }
+    // The classes (their methods may need arrays and wrappers too).
+    let classes = p.classes(m);
     for (f, boolean) in p.wrappers.borrow().iter() {
         let call = format!("{}()", ident(f));
         let _ = if *boolean {
@@ -377,6 +474,7 @@ pub fn print(m: &Module, game: &[Signature], common: &Common) -> String {
     if !p.arrays.is_empty() {
         out += &array_classes(&p.arrays);
     }
+    out += &classes;
     out.push('\n');
     out += &body;
     out
@@ -448,7 +546,215 @@ fn literal(t: &str) -> String {
     if t == "null" { "nil".into() } else { t.to_string() }
 }
 
+/// What every family (its root `R`) has: its objects by their numbers
+/// (`si__R_all`, 0 none), the numbers given back (`si__R_free`), and
+/// `s__R__at`, `s__R__id`, `s__R__add`, `s__R__deallocate`,
+/// `s__R__destroy` (its `onDestroy`s, then given back).
+fn family(r: &str) -> String {
+    format!(
+        "
+array<{r}@> si__{r}_all = {{null}};
+array<int> si__{r}_free;
+
+{r}@ s__{r}__at(int i) {{
+    if (i <= 0 || uint(i) >= si__{r}_all.length()) return null;
+    return si__{r}_all[i];
+}}
+
+int s__{r}__id({r}@ o) {{
+    if (o is null) return 0;
+    return o.wcb__id;
+}}
+
+void s__{r}__add({r}@ o) {{
+    if (si__{r}_free.length() > 0) {{
+        o.wcb__id = si__{r}_free[si__{r}_free.length() - 1];
+        si__{r}_free.removeLast();
+        @si__{r}_all[o.wcb__id] = o;
+    }} else {{
+        o.wcb__id = int(si__{r}_all.length());
+        si__{r}_all.insertLast(o);
+    }}
+}}
+
+void s__{r}__deallocate({r}@ o) {{
+    if (o is null || o.wcb__id == 0) return;
+    @si__{r}_all[o.wcb__id] = null;
+    si__{r}_free.insertLast(o.wcb__id);
+    o.wcb__id = 0;
+}}
+
+void s__{r}__destroy({r}@ o) {{
+    if (o is null || o.wcb__id == 0) return;
+    o.wcb__onDestroy();
+    s__{r}__deallocate(o);
+}}
+"
+    )
+}
+
 impl Printer<'_> {
+    /// The topmost class `c` extends (itself without a parent).
+    fn root_of(&self, c: &str) -> String {
+        let mut c = c.to_string();
+        for _ in 0..64 {
+            match self.parents.get(&c) {
+                Some(p) => c = p.clone(),
+                None => break,
+            }
+        }
+        c
+    }
+
+    /// A method's head and body, in its class.
+    fn method(&mut self, class: &str, f: &Function, out: &mut String) {
+        self.types.locals = f.sig.params.iter().map(|x| (x.name.clone(), x.ty.clone())).collect();
+        self.types.locals.insert("this".into(), format!("{CLASS}{class}"));
+        locals(&f.body, &mut self.types.locals);
+        let returns = f.sig.returns.clone();
+        self.returns = None;
+        self.in_class = true;
+        let params: Vec<String> = f.sig.params.iter().map(|x| format!("{} {}", ty(&x.ty), ident(&x.name))).collect();
+        let head = returns.as_deref().map_or_else(|| "void".to_string(), ty);
+        let _ = writeln!(out, "    {head} {}({}) {{", ident(&f.sig.name), params.join(", "));
+        self.method_returns = returns;
+        self.statements(&f.body, 2, out);
+        self.method_returns = None;
+        out.push_str("    }\n");
+        self.in_class = false;
+    }
+
+    /// The classes of the structs and interfaces, the families' tables and
+    /// each struct's allocator.
+    fn classes(&mut self, m: &Module) -> String {
+        if m.structs.is_empty() && m.interfaces.is_empty() {
+            return String::new();
+        }
+        let mut out = String::new();
+        // Types numbered as lowering numbers them: in a family of several
+        // (an interface's, a struct's with children), from 1.
+        let interfaces: HashSet<&str> = m.interfaces.iter().map(|i| i.name.as_str()).collect();
+        let mut members: Vec<(String, Vec<String>)> = Vec::new();
+        for st in &m.structs {
+            let root = self.root_of(&st.name);
+            match members.iter_mut().find(|(r, _)| *r == root) {
+                Some((_, l)) => l.push(st.name.clone()),
+                None => members.push((root, vec![st.name.clone()])),
+            }
+        }
+        let typeid = |name: &str, root: &str| -> usize {
+            let list = &members.iter().find(|(r, _)| r == root).expect("its family").1;
+            if interfaces.contains(root) || list.len() > 1 { list.iter().position(|s| s == name).map_or(0, |k| k + 1) } else { 0 }
+        };
+        for i in &m.interfaces {
+            let _ = writeln!(out, "\nclass {} {{\n    int wcb__id = 0;\n    int wcb__type() {{ return 0; }}\n    void wcb__onDestroy() {{}}", i.name);
+            for me in &i.methods {
+                let f = &me.function;
+                self.types.locals = f.sig.params.iter().map(|x| (x.name.clone(), x.ty.clone())).collect();
+                let params: Vec<String> = f.sig.params.iter().map(|x| format!("{} {}", ty(&x.ty), ident(&x.name))).collect();
+                let head = f.sig.returns.as_deref().map_or_else(|| "void".to_string(), ty);
+                // What a struct without it gives back: `defaults`.
+                let body = match (&f.sig.returns, &me.defaults) {
+                    (None, _) => String::new(),
+                    (Some(t), Some(d)) => format!(" return {}; ", self.value(d, Some(t))),
+                    (Some(t), None) => format!(" return {}; ", empty(t)),
+                };
+                let _ = writeln!(out, "    {head} {}({}) {{{body}}}", ident(&f.sig.name), params.join(", "));
+            }
+            out.push_str("}\n");
+        }
+        for st in &m.structs {
+            let root = self.root_of(&st.name);
+            let parent = self.parents.get(&st.name).cloned();
+            match &parent {
+                Some(p) => {
+                    let _ = writeln!(out, "\nclass {} : {p} {{", st.name);
+                }
+                None => {
+                    let _ = writeln!(out, "\nclass {} {{\n    int wcb__id = 0;", st.name);
+                }
+            }
+            self.types.locals = HashMap::new();
+            for f in st.fields.iter().filter(|f| !f.is_static) {
+                if f.array.is_some() {
+                    self.arrays.insert(f.ty.clone());
+                    let _ = writeln!(out, "    WC3::{} {};", array_class(&f.ty), ident(&f.name));
+                } else {
+                    let value = f.init.as_ref().map_or_else(|| empty(&f.ty).to_string(), |e| self.value(e, Some(&f.ty)));
+                    let _ = writeln!(out, "    {} {} = {value};", ty(&f.ty), ident(&f.name));
+                }
+            }
+            let _ = writeln!(out, "    int wcb__type() {{ return {}; }}", typeid(&st.name, &root));
+            // `onDestroy`: its own, then its parents'.
+            let own = format!("onDestroy__{}", st.name);
+            let has_own = st.methods.iter().any(|me| me.function.sig.name == own);
+            match (has_own, &parent) {
+                (true, Some(p)) => {
+                    let _ = writeln!(out, "    void wcb__onDestroy() {{\n        {own}();\n        {p}::wcb__onDestroy();\n    }}");
+                }
+                (true, None) => {
+                    let _ = writeln!(out, "    void wcb__onDestroy() {{\n        {own}();\n    }}");
+                }
+                (false, None) => out.push_str("    void wcb__onDestroy() {}\n"),
+                (false, Some(_)) => {}
+            }
+            for me in &st.methods {
+                self.method(&st.name, &me.function, &mut out);
+            }
+            out.push_str("}\n");
+        }
+        let mut roots: Vec<&str> = members.iter().map(|(r, _)| r.as_str()).collect();
+        roots.dedup();
+        for r in roots {
+            out += &family(r);
+        }
+        for st in &m.structs {
+            let r = self.root_of(&st.name);
+            let _ = writeln!(out, "\n{0}@ s__{0}__allocate() {{\n    {0}@ o = {0}();\n    s__{r}__add(o);\n    return o;\n}}", st.name);
+        }
+        out
+    }
+
+    /// The type of an object written (`a`, `a.b`, `a.m()`, `S(x)`): its
+    /// class, when it's one.
+    fn class_of(&self, e: &Expr) -> Option<String> {
+        let t = match e {
+            Expr::Var(n) | Expr::Index(n, _) => self.var_type(n),
+            Expr::Member(o, f) => self.field_type(&self.class_of(o)?, f),
+            Expr::Element(a, _) => match &**a {
+                Expr::Member(o, f) => self.field_type(&self.class_of(o)?, f),
+                _ => None,
+            },
+            Expr::Method(mc) => {
+                let mut c = self.class_of(&mc.object)?;
+                loop {
+                    if let Some(r) = self.methods.get(&(c.clone(), mc.name.clone())) {
+                        break r.clone();
+                    }
+                    c = self.parents.get(&c)?.clone();
+                }
+            }
+            Expr::Call(c) => match c.name.strip_prefix("wcb__cast__") {
+                Some(s) => Some(format!("{CLASS}{s}")),
+                None => self.types.returns.get(c.name.as_str()).copied().flatten().map(String::from),
+            },
+            _ => None,
+        }?;
+        t.strip_prefix(CLASS).map(String::from)
+    }
+
+    /// The type of `class`'s (or a parent's) field `f`.
+    fn field_type(&self, class: &str, f: &str) -> Option<String> {
+        let mut c = class.to_string();
+        for _ in 0..64 {
+            if let Some(t) = self.fields.get(&(c.clone(), f.to_string())) {
+                return Some(t.clone());
+            }
+            c = self.parents.get(&c)?.clone();
+        }
+        None
+    }
+
     fn statements(&mut self, body: &[Stmt], depth: usize, out: &mut String) {
         for s in body {
             self.statement(s, depth, out);
@@ -463,10 +769,24 @@ impl Printer<'_> {
     /// A variable's name: a global of `common.j`'s in `Jass::` (unless a
     /// local hides it).
     fn var(&self, n: &str) -> String {
+        if self.in_class && n == "this" {
+            return "this".into();
+        }
         if !self.types.locals.contains_key(n) && !self.globals.contains(n) && self.common.globals.contains_key(n) { format!("Jass::{n}") } else { ident(n) }
     }
 
     fn call(&self, c: &Call) -> String {
+        if c.name == "wcb__null" {
+            return "null".into();
+        }
+        if let Some(t) = c.name.strip_prefix("wcb__cast__") {
+            return format!("cast<{t}>({})", c.args.first().map_or(String::new(), |a| self.expr(a, 0)));
+        }
+        // `super.m(...)`: the parent's, `P::m(...)`.
+        if let Some((class, m)) = c.name.split_once("::") {
+            let args: Vec<String> = c.args.iter().map(|a| self.value(a, None)).collect();
+            return format!("{class}::{}({})", ident(m), args.join(", "));
+        }
         let name = if self.common.natives.contains_key(&c.name) { format!("Jass::{}", c.name) } else { ident(&c.name) };
         let params = self.params.get(c.name.as_str());
         let args: Vec<String> = c.args.iter().enumerate().map(|(i, a)| self.value(a, params.and_then(|p| p.get(i)).copied())).collect();
@@ -507,7 +827,7 @@ impl Printer<'_> {
             Stmt::Set { name, index, value, .. } => {
                 let want = self.var_type(name);
                 let index = index.as_ref().map_or(String::new(), |i| format!("[{}]", self.expr(i, 0)));
-                let at = if want.as_deref().is_some_and(is_code) && index.is_empty() { "@" } else { "" };
+                let at = if want.as_deref().is_some_and(|t| is_code(t) || t.starts_with(CLASS)) && index.is_empty() { "@" } else { "" };
                 let _ = writeln!(out, "{pad}{at}{}{index} = {};", self.var(name), self.value(value, want.as_deref()));
             }
             Stmt::Call { call: c, .. } => {
@@ -539,7 +859,8 @@ impl Printer<'_> {
             }
             Stmt::Return { value, .. } => match value {
                 Some(v) => {
-                    let _ = writeln!(out, "{pad}return {};", self.value(v, self.returns));
+                    let want = self.method_returns.clone();
+                    let _ = writeln!(out, "{pad}return {};", self.value(v, want.as_deref().or(self.returns)));
                 }
                 None => {
                     let _ = writeln!(out, "{pad}return;");
@@ -547,8 +868,23 @@ impl Printer<'_> {
             },
             // As the game when it isn't debugging.
             Stmt::Debug { .. } => {}
-            Stmt::SetMember { .. } | Stmt::CallMethod { .. } | Stmt::StaticIf { .. } => unreachable!("not lowered: build checks Module::not_lowered"),
+            // A class's field, and its method called.
+            Stmt::SetMember { object, name, index, value, .. } => {
+                let want = self.class_of(object).and_then(|c| self.field_type(&c, name));
+                let at = if want.as_deref().is_some_and(|t| is_code(t) || t.starts_with(CLASS)) && index.is_none() { "@" } else { "" };
+                let index = index.as_ref().map_or(String::new(), |i| format!("[{}]", self.expr(i, 0)));
+                let _ = writeln!(out, "{pad}{at}{}.{}{index} = {};", self.expr(object, 8), ident(name), self.value(value, want.as_deref()));
+            }
+            Stmt::CallMethod { call, .. } => {
+                let _ = writeln!(out, "{pad}{};", self.method_call(call));
+            }
+            Stmt::StaticIf { .. } => unreachable!("not lowered: build checks Module::not_lowered"),
         }
+    }
+
+    fn method_call(&self, c: &MethodCall) -> String {
+        let args: Vec<String> = c.args.iter().map(|a| self.value(a, None)).collect();
+        format!("{}.{}({})", self.expr(&c.object, 8), ident(&c.name), args.join(", "))
     }
 
     /// `e`, in parentheses when it binds looser than `min`.
@@ -557,9 +893,13 @@ impl Printer<'_> {
             Expr::Literal(l) => (literal(l), 8),
             Expr::Var(n) => (self.var(n), 8),
             Expr::Index(n, i) => (format!("{}[{}]", self.var(n), self.expr(i, 0)), 8),
+            // Objects compared: the same one.
+            Expr::Call(c) if c.name == "wcb__same" && c.args.len() == 2 => (format!("{} is {}", self.expr(&c.args[0], 4), self.expr(&c.args[1], 4)), 3),
             Expr::Call(c) => (self.call(c), 8),
             Expr::Code(n) => (format!("@{}", ident(n)), 8),
-            Expr::Member(..) | Expr::Method(_) | Expr::Element(..) => unreachable!("not lowered: build checks Module::not_lowered"),
+            Expr::Member(o, n) => (format!("{}.{}", self.expr(o, 8), ident(n)), 8),
+            Expr::Method(mc) => (self.method_call(mc), 8),
+            Expr::Element(a, i) => (format!("{}[{}]", self.expr(a, 8), self.expr(i, 0)), 8),
             Expr::Unary(op, x) => {
                 let inner = self.expr(x, UNARY);
                 let text = match op {

@@ -107,11 +107,26 @@ Shape isn't built into JASS yet").
   type's empty value) and grow as it's set; `a[i] = x` reads as in JASS.
   A string is never null (`null` where one goes is `""`), a variable
   always has a value, a name that's one of AngelScript's words gets the
-  build's prefix (`wcb__in`). Not yet: structs as classes (they're
-  lowered into arrays, as for JASS).
+  build's prefix (`wcb__in`). **Structs as classes** (decided
+  2026-11-25: an object is a handle, `S@`): `lower_for(.., classes)`
+  keeps them (see `structs::lower`), the printer writes a class for each
+  struct and interface (an interface a base class whose methods give
+  back their `defaults`; `extends` its parent; instance fields with
+  their values, methods virtual, so a `stub` or an interface's method
+  is AngelScript's own call; `wcb__type()` the type's number as
+  lowering's, `wcb__onDestroy()` its `onDestroy__S` then its parent's);
+  static members are globals and functions (`s__S_x`, `s__S_m`), as
+  AngelScript's classes have none. Every family (its root `R`) keeps
+  its objects by number (`si__R_all`, numbers given back reused), so
+  where vJASS takes a struct as an integer the number goes
+  (`SaveInteger(ht, k, 0, s__R__id(x))`) and comes back
+  (`cast<S>(s__R__at(LoadInteger(...)))`); `0` where an object goes is
+  `null`, `a == b` of objects `a is b`. Instance 0 is no object:
+  `thistype(0).next` is an error (a static field instead). Not yet:
+  `extends array`, `.execute` of an object's method.
 - **`lower`** (the build's stage 4): what vJASS and Zinc add, made into
-  JASS, for the JASS output and AngelScript's for now (the plan: classes
-  for AngelScript).
+  JASS, for the JASS output; for AngelScript all of it but structs and
+  interfaces (`lower_for`).
   - Libraries in the order of `requires` (one required and not there is
     an error, unless `optional`; so is a cycle). A private name is
     `<scope>__<name>` (a scope in a scope `<outer>_<inner>__<name>`), a

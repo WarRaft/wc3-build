@@ -1,6 +1,7 @@
 //! What vJASS and Zinc add, lowered into what the game's JASS has (the
 //! build's stage 4), so the JASS output ([`crate::jass`]) gets a module of
-//! JASS only. AngelScript, which has classes, won't need it.
+//! JASS only. AngelScript (`lower_for` with `classes`) gets all of it
+//! but structs and interfaces, which stay classes.
 //!
 //! - **Libraries and scopes.** Each library after those it `requires`
 //!   (one it requires that isn't there is an error, unless `optional`; so
@@ -43,6 +44,12 @@ pub fn lower(m: &Module) -> Result<Module, Vec<Error>> {
 /// [`lower`], with the game's natives and functions (`game`: what a hook
 /// of one takes and gives back).
 pub fn lower_with(m: &Module, game: &[Signature]) -> Result<Module, Vec<Error>> {
+    lower_for(m, game, false)
+}
+
+/// [`lower_with`]; with `classes` (AngelScript's) structs and interfaces
+/// are kept as classes ([`crate::structs::lower`]).
+pub fn lower_for(m: &Module, game: &[Signature], classes: bool) -> Result<Module, Vec<Error>> {
     let mut m = m.clone();
     let mut errors = Vec::new();
     let order = library_order(&m, &mut errors);
@@ -234,7 +241,7 @@ pub fn lower_with(m: &Module, game: &[Signature]) -> Result<Module, Vec<Error>> 
         }
         t.owner = Owner::default();
     }
-    let lowered = crate::structs::lower(&mut m, &mut errors);
+    let lowered = crate::structs::lower(&mut m, game, classes, &mut errors);
     let struct_inits = lowered.inits;
 
     // Each library's structs' `onInit`s before its initializer; those of

@@ -196,7 +196,26 @@ impl Types {
 /// The structs and interfaces of `m` (modules taken in, names already
 /// resolved) lowered: their globals and functions added, every member
 /// written as they are, their types as `integer`.
-pub fn lower(m: &mut Module, errors: &mut Vec<Error>) -> Lowered {
+///
+/// With `classes` (AngelScript's, see [`crate::angelscript`]) they're kept
+/// as classes: `m.structs` and `m.interfaces` stay, each instance method
+/// in its struct with its body lowered, the instance fields in it; a
+/// struct's type stays its name (an object). Static fields and methods
+/// are globals and functions as for JASS. `a.x`, `set a.x = v` and
+/// `a.m(...)` of an instance stay members (`onDestroy` is
+/// `onDestroy__S`, an operator `wcb__get_x`, `wcb__set_x`,
+/// `wcb__getindex`, `wcb__setindex`, `wcb__lt`); `super.m(...)` is
+/// `P::m(...)`; `x.destroy()` and `x.deallocate()` are
+/// `s__R__destroy(x)` and `s__R__deallocate(x)` of the family's root `R`,
+/// `S.allocate()` (and `S.create()` without one of its own)
+/// `s__S__allocate()`, `x.getType()` `x.wcb__type()`. Where an object
+/// and an integer meet, its number: `s__R__id(x)` where an integer goes,
+/// `wcb__cast__S(s__R__at(i))` where an `S` goes from an integer,
+/// `wcb__cast__S(x)` from a parent; `0` where an object goes is
+/// `wcb__null()`, `a == b` of objects `wcb__same(a, b)`. Instance 0 is no
+/// object: `S(0).x` is an error. Not yet: `extends array`, `.execute` of
+/// an instance's method.
+pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec<Error>) -> Lowered {
     let structs = std::mem::take(&mut m.structs);
     let interfaces = std::mem::take(&mut m.interfaces);
     let mut infos: HashMap<String, Info> = HashMap::new();
@@ -214,8 +233,11 @@ pub fn lower(m: &mut Module, errors: &mut Vec<Error>) -> Lowered {
     }
     for s in &structs {
         let err = |errors: &mut Vec<Error>, what: &str| errors.push(Error { origin: s.origin.clone(), message: format!("struct {}: {what} isn't built into JASS yet", s.name) });
+        if classes && s.extends.as_deref() == Some("array") {
+            errors.push(Error { origin: s.origin.clone(), message: format!("struct {} extends array: not built into AngelScript yet", s.name) });
+        }
         match s.size.as_ref().map(literal_int) {
-            Some(Some(n)) if n > DEFAULT_SIZE => err(errors, "more than 8190 instances"),
+            Some(Some(n)) if n > DEFAULT_SIZE && !classes => err(errors, "more than 8190 instances"),
             Some(None) => err(errors, "a size that isn't a number"),
             _ => {}
         }
@@ -288,9 +310,11 @@ pub fn lower(m: &mut Module, errors: &mut Vec<Error>) -> Lowered {
 
     // Globals, the allocators, the methods as functions.
     let mut inits = Vec::new();
+    // Classes': each instance method's function, its struct and name.
+    let mut instance: HashMap<String, (String, String)> = HashMap::new();
     for s in &structs {
         let info = &types.infos[&s.name];
-        for f in &s.fields {
+        for f in s.fields.iter().filter(|f| !classes || f.is_static) {
             let mut g = Global::new(info.field(&f.name), f.ty.clone(), None, s.origin.clone());
             g.constant = f.constant;
             if f.is_static {
@@ -301,7 +325,7 @@ pub fn lower(m: &mut Module, errors: &mut Vec<Error>) -> Lowered {
             }
             m.globals.push(g);
         }
-        if !info.array {
+        if !info.array && !classes {
             allocator(m, &types, &structs, s);
         }
         let mut own_inits = 0;
@@ -317,7 +341,10 @@ pub fn lower(m: &mut Module, errors: &mut Vec<Error>) -> Lowered {
                 own_inits += 1;
             }
             f.sig.name = info.method(&f.sig.name);
-            if !me.is_static {
+            if classes && !me.is_static {
+                // Lowered with the functions, then back into its class.
+                instance.insert(f.sig.name.clone(), (s.name.clone(), class_method(&me.function.sig.name, &s.name)));
+            } else if !me.is_static {
                 f.sig.params.insert(0, Param { ty: s.name.clone(), name: "this".into() });
             }
             // A method of its struct: what `thistype` is.
@@ -326,7 +353,7 @@ pub fn lower(m: &mut Module, errors: &mut Vec<Error>) -> Lowered {
         }
     }
     // The families' roots' allocators (an interface's) and destroyers.
-    for (root, list) in &types.families {
+    for (root, list) in types.families.iter().filter(|_| !classes) {
         let info = &types.infos[root];
         if info.interface {
             free_list(m, root, &info.name, s_origin(&interfaces, root));
@@ -335,9 +362,20 @@ pub fn lower(m: &mut Module, errors: &mut Vec<Error>) -> Lowered {
     }
 
     // Every function's members written as JASS has them.
-    let sigs: HashMap<String, Option<String>> =
-        m.functions.iter().map(|f| (f.sig.name.clone(), f.sig.returns.clone())).chain(m.natives.iter().map(|n| (n.sig.name.clone(), n.sig.returns.clone()))).collect();
+    let sigs: HashMap<String, Option<String>> = game
+        .iter()
+        .filter(|_| classes)
+        .map(|s| (s.name.clone(), s.returns.clone()))
+        .chain(m.functions.iter().map(|f| (f.sig.name.clone(), f.sig.returns.clone())))
+        .chain(m.natives.iter().map(|n| (n.sig.name.clone(), n.sig.returns.clone())))
+        .collect();
     let params: HashMap<String, Vec<String>> = m.functions.iter().map(|f| (f.sig.name.clone(), f.sig.params.iter().map(|p| p.ty.clone()).collect())).collect();
+    // Classes': what every function and native takes, for an object's number.
+    let takes: HashMap<String, Vec<String>> = if classes {
+        game.iter().chain(m.natives.iter().map(|n| &n.sig)).chain(m.functions.iter().map(|f| &f.sig)).map(|s| (s.name.clone(), s.params.iter().map(|p| p.ty.clone()).collect())).collect()
+    } else {
+        HashMap::new()
+    };
     let globals: HashMap<String, String> = m.globals.iter().map(|g| (g.name.clone(), g.ty.clone())).collect();
     let global_arrays: HashSet<String> = m.globals.iter().filter(|g| g.array).map(|g| g.name.clone()).collect();
     let dispatched: RefCell<BTreeSet<(String, String)>> = RefCell::new(BTreeSet::new());
@@ -357,7 +395,11 @@ pub fn lower(m: &mut Module, errors: &mut Vec<Error>) -> Lowered {
         let mut locals: HashMap<String, String> = f.sig.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect();
         let mut arrays = HashSet::new();
         local_types(&mut f.body, &this_type, &mut locals, &mut arrays);
+        let returns = f.sig.returns.clone();
         let cx = Cx {
+            classes,
+            takes: &takes,
+            returns: returns.as_deref(),
             types: &types,
             sigs: &sigs,
             params: &params,
@@ -377,6 +419,53 @@ pub fn lower(m: &mut Module, errors: &mut Vec<Error>) -> Lowered {
         }
     }
     let mut setup = Vec::new();
+    if classes {
+        // The instance methods back into their classes, the classes kept.
+        let mut structs = structs;
+        let mut interfaces = interfaces;
+        let mut i = 0;
+        while i < m.functions.len() {
+            let Some((owner, name)) = instance.get(&m.functions[i].sig.name).cloned() else {
+                i += 1;
+                continue;
+            };
+            let mut f = m.functions.remove(i);
+            f.sig.name = name.clone();
+            let st = structs.iter_mut().find(|s| s.name == owner).expect("its struct");
+            if let Some(me) = st.methods.iter_mut().find(|me| !me.is_static && class_method(&me.function.sig.name, &owner) == name) {
+                me.function = f;
+            }
+        }
+        for st in &mut structs {
+            st.methods.retain(|me| !me.is_static);
+            for f in &mut st.fields {
+                f.ty = if f.ty == "thistype" { st.name.clone() } else { f.ty.clone() };
+            }
+        }
+        for i in &mut interfaces {
+            for me in &mut i.methods {
+                me.function.sig.name = class_method(&me.function.sig.name, &i.name);
+            }
+        }
+        m.structs = structs;
+        m.interfaces = interfaces;
+        function_pointers(m, &types, &pointers, &mut setup);
+        // Function interface types are integers; a struct's stays an object.
+        let integer = |t: &mut String| {
+            if types.functions.contains_key(t.as_str()) {
+                *t = "integer".into();
+            }
+        };
+        m.globals.iter_mut().for_each(|g| integer(&mut g.ty));
+        for f in &mut m.functions {
+            f.sig.params.iter_mut().for_each(|p| integer(&mut p.ty));
+            if let Some(r) = &mut f.sig.returns {
+                integer(r);
+            }
+            local_types_integer(&mut f.body, &|t| types.functions.contains_key(t));
+        }
+        return Lowered { inits, setup };
+    }
     for (root, name) in dispatched.into_inner() {
         dispatcher(m, &types, &root, &name, &mut setup);
     }
@@ -402,6 +491,22 @@ pub fn lower(m: &mut Module, errors: &mut Vec<Error>) -> Lowered {
         local_types_integer(&mut f.body, &|t| types.infos.contains_key(t) || types.functions.contains_key(t));
     }
     Lowered { inits, setup }
+}
+
+/// An instance method's name in its class: an operator's as
+/// [`lower`] says, `onDestroy` its struct's own.
+pub(crate) fn class_method(m: &str, owner: &str) -> String {
+    match m.strip_prefix("operator ") {
+        Some("[]") => "wcb__getindex".into(),
+        Some("[]=") => "wcb__setindex".into(),
+        Some("<") => "wcb__lt".into(),
+        Some(x) => match x.strip_suffix('=') {
+            Some(x) => format!("wcb__set_{x}"),
+            None => format!("wcb__get_{x}"),
+        },
+        None if m == "onDestroy" => format!("onDestroy__{owner}"),
+        None => m.into(),
+    }
 }
 
 fn s_origin(interfaces: &[Interface], name: &str) -> Option<Origin> {
@@ -732,6 +837,12 @@ fn local_types_integer(body: &mut [Stmt], integer: &dyn Fn(&str) -> bool) {
 
 /// What a function's members are written in.
 struct Cx<'a> {
+    /// AngelScript's classes ([`lower`]).
+    classes: bool,
+    /// Classes': what every function and native takes.
+    takes: &'a HashMap<String, Vec<String>>,
+    /// What the function gives back.
+    returns: Option<&'a str>,
     types: &'a Types,
     /// Functions: what each returns.
     sigs: &'a HashMap<String, Option<String>>,
@@ -774,9 +885,69 @@ impl Pointers {
     }
 }
 
+fn cast(t: &str, e: Expr) -> Expr {
+    Expr::call(format!("wcb__cast__{t}"), vec![e])
+}
+
+fn null_object() -> Expr {
+    Expr::call("wcb__null", vec![])
+}
+
+fn is_zero(e: &Expr) -> bool {
+    matches!(e, Expr::Literal(l) if l == "0" || l == "null")
+}
+
 impl Cx<'_> {
     fn error(&self, errors: &mut Vec<Error>, line: usize, message: String) {
         errors.push(Error { origin: Origin { file: self.file.to_string(), line }, message });
+    }
+
+    /// Is `t` a class (AngelScript's)?
+    fn is_class(&self, t: &str) -> bool {
+        self.classes && self.types.infos.contains_key(t)
+    }
+
+    /// `e` (of type `have`) where a `want` goes: with classes, an object's
+    /// number where an integer goes and back, a cast to a child, `0` as no
+    /// object; as it is otherwise.
+    fn coerce(&self, e: Expr, have: Option<&str>, want: Option<&str>) -> Expr {
+        if !self.classes {
+            return e;
+        }
+        let have_c = have.filter(|t| self.is_class(t));
+        let want_c = want.filter(|t| self.is_class(t));
+        match (have_c, want_c) {
+            (Some(h), Some(w)) => {
+                if self.types.chain(h).iter().any(|i| i.name == w) {
+                    e
+                } else {
+                    cast(w, e)
+                }
+            }
+            (Some(h), None) if want.is_some() => Expr::call(format!("s__{}__id", self.types.root(h)), vec![e]),
+            (None, Some(_)) if is_zero(&e) => null_object(),
+            (None, Some(w)) if have == Some("integer") || matches!(e, Expr::Literal(_)) => cast(w, Expr::call(format!("s__{}__at", self.types.root(w)), vec![e])),
+            _ => e,
+        }
+    }
+
+    /// Arguments (of types `have`) where `want` go ([`Cx::coerce`]).
+    fn coerce_args(&self, args: Vec<Expr>, have: &[Option<String>], want: Option<&Vec<String>>) -> Vec<Expr> {
+        if !self.classes {
+            return args;
+        }
+        args.into_iter().enumerate().map(|(i, a)| self.coerce(a, have.get(i).cloned().flatten().as_deref(), want.and_then(|w| w.get(i)).map(String::as_str))).collect()
+    }
+
+    /// `e` where an integer goes (an index): an object's number.
+    fn integer(&self, e: Expr, line: usize, errors: &mut Vec<Error>) -> Expr {
+        let (e, t) = self.expr(e, line, errors);
+        self.coerce(e, t.as_deref(), Some("integer"))
+    }
+
+    /// Arguments lowered, and their types.
+    fn args(&self, args: Vec<Expr>, line: usize, errors: &mut Vec<Error>) -> (Vec<Expr>, Vec<Option<String>>) {
+        args.into_iter().map(|a| self.expr(a, line, errors)).unzip()
     }
 
     /// The struct a name is as an object (`Data.x`, `thistype.x`).
@@ -811,6 +982,15 @@ impl Cx<'_> {
     fn operator(&self, t: &str, instance: Option<Expr>, op: &str, mut args: Vec<Expr>, line: usize, errors: &mut Vec<Error>) -> (Expr, Option<String>) {
         let name = format!("operator {op}");
         let (owner, x) = self.types.method(t, &name).expect("has_operator");
+        if self.classes && !x.is_static {
+            return match instance {
+                Some(o) => (Expr::Method(Box::new(MethodCall { object: o, name: class_method(&name, &owner.name), args })), x.returns.clone()),
+                None => {
+                    self.error(errors, line, format!("{t}'s `operator {op}`: an instance's"));
+                    (Expr::lit("0"), None)
+                }
+            };
+        }
         if self.types.dispatches(t, &name) {
             self.error(errors, line, format!("{t}'s `operator {op}` by the instance's type (an interface's) isn't built into JASS yet"));
             return (Expr::lit("0"), None);
@@ -834,6 +1014,10 @@ impl Cx<'_> {
             return Some((info.name.clone(), None));
         }
         let (o, t) = self.expr(object, line, errors);
+        if self.classes && o == null_object() {
+            self.error(errors, line, format!("`.{name}` of instance 0, which in AngelScript is no object (null): a static field instead"));
+            return None;
+        }
         match t.filter(|t| self.types.infos.contains_key(t)) {
             Some(t) => Some((t, Some(o))),
             None => {
@@ -855,6 +1039,11 @@ impl Cx<'_> {
         {
             let v = self.member(t, instance, &d, line, errors).0;
             return self.member(dt, Some(v), name, line, errors);
+        }
+        if self.classes
+            && let (Some((_, (ty, false, _, _))), Some(o)) = (self.types.field(&t, name), &instance)
+        {
+            return (Expr::Member(Box::new(o.clone()), name.to_string()), Some(ty.clone()));
         }
         match self.field_of(t, instance, name, None, line, errors) {
             Some((array, index, ty)) => (index.map_or_else(|| Expr::Var(array.clone()), |i| Expr::Index(array.clone(), Box::new(i))), Some(ty)),
@@ -887,6 +1076,8 @@ impl Cx<'_> {
     fn call_stmt(&self, e: Expr, line: usize) -> Stmt {
         match e {
             Expr::Call(call) => Stmt::Call { call, line },
+            // A class's method (AngelScript's).
+            Expr::Method(call) => Stmt::CallMethod { call: *call, line },
             _ => Stmt::Call { call: Call { name: "DoNothing".into(), args: vec![] }, line },
         }
     }
@@ -909,38 +1100,53 @@ impl Cx<'_> {
 
     fn stmt(&self, s: Stmt, errors: &mut Vec<Error>) -> Stmt {
         match s {
-            Stmt::Local { ty, name, array, init, line } => Stmt::Local { ty, name, array, init: init.map(|e| self.expr(e, line, errors).0), line },
+            Stmt::Local { ty, name, array, init, line } => {
+                let init = init.map(|e| {
+                    let (e, t) = self.expr(e, line, errors);
+                    self.coerce(e, t.as_deref(), Some(&ty))
+                });
+                Stmt::Local { ty, name, array, init, line }
+            }
             Stmt::Set { name, index: Some(i), value, line } if self.indexed(&name).is_some_and(|(t, _)| self.has_operator(&t, "[]=")) => {
                 let (t, o) = self.indexed(&name).unwrap();
                 let i = self.expr(i, line, errors).0;
                 let value = self.expr(value, line, errors).0;
                 self.call_stmt(self.operator(&t, o, "[]=", vec![i, value], line, errors).0, line)
             }
-            Stmt::Set { name, index, value, line } => Stmt::Set { name, index: index.map(|e| self.expr(e, line, errors).0), value: self.expr(value, line, errors).0, line },
-            Stmt::Call { call, line } => match self.expr(Expr::Call(call), line, errors).0 {
-                Expr::Call(call) => Stmt::Call { call, line },
-                // A cast called for nothing.
-                _ => Stmt::Call { call: Call { name: "DoNothing".into(), args: vec![] }, line },
-            },
+            Stmt::Set { name, index, value, line } => {
+                let index = index.map(|e| self.integer(e, line, errors));
+                let (value, t) = self.expr(value, line, errors);
+                let value = self.coerce(value, t.as_deref(), self.type_of_var(&name).as_deref());
+                Stmt::Set { name, index, value, line }
+            }
+            // A cast called for nothing is nothing.
+            Stmt::Call { call, line } => self.call_stmt(self.expr(Expr::Call(call), line, errors).0, line),
             Stmt::If { branches, otherwise, line } => {
                 Stmt::If { branches: branches.into_iter().map(|(c, b)| (self.expr(c, line, errors).0, self.stmts(b, errors))).collect(), otherwise: otherwise.map(|b| self.stmts(b, errors)), line }
             }
             Stmt::Loop { body, line } => Stmt::Loop { body: self.stmts(body, errors), line },
             Stmt::ExitWhen { cond, line } => Stmt::ExitWhen { cond: self.expr(cond, line, errors).0, line },
-            Stmt::Return { value, line } => Stmt::Return { value: value.map(|e| self.expr(e, line, errors).0), line },
+            Stmt::Return { value, line } => Stmt::Return {
+                value: value.map(|e| {
+                    let (e, t) = self.expr(e, line, errors);
+                    self.coerce(e, t.as_deref(), self.returns)
+                }),
+                line,
+            },
             Stmt::Debug { stmt, line } => Stmt::Debug { stmt: Box::new(self.stmt(*stmt, errors)), line },
             Stmt::SetMember { object, name, index, value, line } => {
-                let value = self.expr(value, line, errors).0;
-                let index = index.map(|e| self.expr(e, line, errors).0);
+                let (value, vt) = self.expr(value, line, errors);
+                let index = index.map(|e| self.integer(e, line, errors));
                 match self.object(object, &name, line, errors) {
-                    Some((t, instance)) => self.set_member(t, instance, &name, index, value, line, errors),
+                    Some((t, instance)) => {
+                        let ty = self.types.field(&t, &name).map(|(_, f)| f.0.clone());
+                        let value = self.coerce(value, vt.as_deref(), ty.as_deref());
+                        self.set_member(t, instance, &name, index, value, line, errors)
+                    }
                     None => Stmt::Set { name: "wcb__error".into(), index: None, value, line },
                 }
             }
-            Stmt::CallMethod { call, line } => match self.expr(Expr::Method(Box::new(call)), line, errors).0 {
-                Expr::Call(call) => Stmt::Call { call, line },
-                _ => Stmt::Call { call: Call { name: "DoNothing".into(), args: vec![] }, line },
-            },
+            Stmt::CallMethod { call, line } => self.call_stmt(self.expr(Expr::Method(Box::new(call)), line, errors).0, line),
             s @ Stmt::StaticIf { .. } => s,
         }
     }
@@ -957,6 +1163,11 @@ impl Cx<'_> {
         {
             let v = self.member(t, instance, &d, line, errors).0;
             return self.set_member(dt, Some(v), name, index, value, line, errors);
+        }
+        if self.classes
+            && let (Some((_, (_, false, _, _))), Some(o)) = (self.types.field(&t, name), &instance)
+        {
+            return Stmt::SetMember { object: o.clone(), name: name.to_string(), index, value, line };
         }
         {
             let field = self.types.field(&t, name).map(|(_, f)| f.3);
@@ -1004,7 +1215,7 @@ impl Cx<'_> {
                 (Expr::Var(n), t)
             }
             Expr::Index(n, i) => {
-                let i = self.expr(*i, line, errors).0;
+                let i = self.integer(*i, line, errors);
                 // `x[i]` of a struct with `operator []`, `S[i]` of a static one.
                 if let Some((t, o)) = self.indexed(&n).filter(|(t, _)| self.has_operator(t, "[]")) {
                     return self.operator(&t, o, "[]", vec![i], line, errors);
@@ -1013,14 +1224,17 @@ impl Cx<'_> {
                 (Expr::Index(n, Box::new(i)), t)
             }
             Expr::Call(Call { name, args }) => {
-                let mut args: Vec<Expr> = args.into_iter().map(|a| self.expr(a, line, errors).0).collect();
+                let (mut args, have) = self.args(args, line, errors);
                 // A cast: `Data(x)`, `thistype(x)`.
                 let cast = if name == "thistype" { self.current.map(String::from) } else { self.types.infos.contains_key(&name).then(|| name.clone()) };
                 if let Some(t) = cast
                     && args.len() == 1
                 {
-                    return (args.remove(0), Some(t));
+                    // From what can't be told: an integer, as a cast mostly is.
+                    let e = self.coerce(args.remove(0), have[0].as_deref().or(Some("integer")), Some(&t));
+                    return (e, Some(t));
                 }
+                let args = self.coerce_args(args, &have, self.takes.get(&name));
                 let t = self.sigs.get(&name).cloned().flatten();
                 (Expr::Call(Call { name, args }), t)
             }
@@ -1063,13 +1277,18 @@ impl Cx<'_> {
                 }
             }
             Expr::Element(a, i) => {
-                let i = self.expr(*i, line, errors).0;
+                let i = self.integer(*i, line, errors);
                 match *a {
                     Expr::Member(object, name) => {
                         let Some((t, instance)) = self.object(*object, &name, line, errors) else {
                             return (Expr::lit("0"), None);
                         };
                         // An array field's element.
+                        if self.classes
+                            && let (Some((_, (ty, false, _, true))), Some(o)) = (self.types.field(&t, &name), &instance)
+                        {
+                            return (Expr::Element(Box::new(Expr::Member(Box::new(o.clone()), name.clone())), Box::new(i)), Some(ty.clone()));
+                        }
                         if self.types.field(&t, &name).is_some_and(|(_, f)| f.3) {
                             return match self.field_of(t, instance, &name, Some(i), line, errors) {
                                 Some((array, Some(index), ty)) => (Expr::Index(array, Box::new(index)), Some(ty)),
@@ -1093,6 +1312,7 @@ impl Cx<'_> {
             Expr::Binary(a, op, b) => {
                 let (a, t) = self.expr(*a, line, errors);
                 let (b, tb) = self.expr(*b, line, errors);
+                let tb_kept = tb.clone();
                 // `a < b` of structs with `operator <` (`a > b` is `b < a`,
                 // `a <= b` is `not (b < a)`, `a >= b` is `not (a < b)`).
                 if matches!(op, BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq)
@@ -1103,8 +1323,26 @@ impl Cx<'_> {
                     let e = if matches!(op, BinOp::LtEq | BinOp::GtEq) { Expr::Unary(UnaryOp::Not, Box::new(lt)) } else { lt };
                     return (e, Some("boolean".into()));
                 }
-                let t = if matches!(op, BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq | BinOp::And | BinOp::Or) { Some("boolean".into()) } else { t };
-                (Expr::Binary(Box::new(a), op, Box::new(b)), t)
+                let tb = tb_kept;
+                let t2 = if matches!(op, BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq | BinOp::And | BinOp::Or) { Some("boolean".into()) } else { t.clone() };
+                if self.classes {
+                    let (ca, cb) = (t.as_deref().is_some_and(|x| self.is_class(x)), tb.as_deref().is_some_and(|x| self.is_class(x)));
+                    if ca || cb {
+                        // Objects compared: the same one; with 0, none.
+                        if matches!(op, BinOp::Eq | BinOp::NotEq) && ((ca && cb) || (ca && is_zero(&b)) || (cb && is_zero(&a))) {
+                            let side = |e: Expr| if is_zero(&e) { null_object() } else { e };
+                            let same = Expr::call("wcb__same", vec![side(a), side(b)]);
+                            let e = if op == BinOp::NotEq { Expr::Unary(UnaryOp::Not, Box::new(same)) } else { same };
+                            return (e, Some("boolean".into()));
+                        }
+                        // Their numbers otherwise.
+                        let a = self.coerce(a, t.as_deref(), Some("integer"));
+                        let b = self.coerce(b, tb.as_deref(), Some("integer"));
+                        let t2 = if t2.as_deref().is_some_and(|x| self.is_class(x)) { Some("integer".into()) } else { t2 };
+                        return (Expr::Binary(Box::new(a), op, Box::new(b)), t2);
+                    }
+                }
+                (Expr::Binary(Box::new(a), op, Box::new(b)), t2)
             }
             e @ Expr::Literal(_) => (e, None),
         }
@@ -1112,7 +1350,7 @@ impl Cx<'_> {
 
     fn method(&self, m: MethodCall, line: usize, errors: &mut Vec<Error>) -> (Expr, Option<String>) {
         let MethodCall { object, name, args } = m;
-        let mut args: Vec<Expr> = args.into_iter().map(|a| self.expr(a, line, errors).0).collect();
+        let (mut args, have) = self.args(args, line, errors);
         let call = |n: String, args: Vec<Expr>| Expr::Call(Call { name: n, args });
         // `.evaluate` and `.execute` of a function or a method: through its
         // trigger, the arguments in globals (the JASS output makes it:
@@ -1136,6 +1374,23 @@ impl Cx<'_> {
                         }
                     };
                     if let Some((owner, x)) = t.as_deref().and_then(|t| self.types.method(t, mname)) {
+                        // An object's method: `.evaluate` called straight
+                        // (in the same thread, as evaluate runs it).
+                        if self.classes && !x.is_static {
+                            let want: Vec<String> = x.params.iter().map(|p| p.ty.clone()).collect();
+                            let args = self.coerce_args(args, &have, Some(&want));
+                            return match (instance, name.as_str()) {
+                                (Some(o), "evaluate") => (Expr::Method(Box::new(MethodCall { object: o, name: class_method(mname, &owner.name), args })), x.returns.clone()),
+                                (Some(_), _) => {
+                                    self.error(errors, line, format!("{}.{mname}.execute: an object's method in a thread of its own isn't built into AngelScript yet", owner.name));
+                                    (Expr::lit("0"), None)
+                                }
+                                (None, _) => {
+                                    self.error(errors, line, format!("{}.{mname}: a method of an instance", owner.name));
+                                    (Expr::lit("0"), None)
+                                }
+                            };
+                        }
                         if !x.is_static {
                             match instance {
                                 Some(o) => args.insert(0, o),
@@ -1156,6 +1411,12 @@ impl Cx<'_> {
             let parent = self.current.and_then(|c| self.types.infos[c].parent.clone());
             return match parent.as_deref().and_then(|p| self.types.method(p, &name)) {
                 Some((owner, x)) if !x.abstract_ => {
+                    let want: Vec<String> = x.params.iter().map(|p| p.ty.clone()).collect();
+                    let args = self.coerce_args(args, &have, Some(&want));
+                    if self.classes && !x.is_static {
+                        return (call(format!("{}::{}", owner.name, class_method(&name, &owner.name)), args), x.returns.clone());
+                    }
+                    let mut args = args;
                     if !x.is_static {
                         args.insert(0, this());
                     }
@@ -1181,6 +1442,8 @@ impl Cx<'_> {
                 },
             };
             let t = self.types.method(&info.name, &name).and_then(|(_, x)| x.returns.clone()).or_else(|| matches!(name.as_str(), "create" | "allocate").then(|| info.name.clone()));
+            let want: Option<Vec<String>> = self.types.method(&info.name, &name).map(|(_, x)| x.params.iter().map(|p| p.ty.clone()).collect());
+            let args = self.coerce_args(args, &have, want.as_ref());
             return (call(f, args), t);
         }
         let (o, t) = self.expr(object, line, errors);
@@ -1211,6 +1474,13 @@ impl Cx<'_> {
             self.error(errors, line, format!(".{name}() of what isn't a struct (or whose type can't be told)"));
             return (Expr::lit("0"), None);
         };
+        let args = match self.types.method(&t, &name) {
+            Some((_, x)) => {
+                let want: Vec<String> = x.params.iter().map(|p| p.ty.clone()).collect();
+                self.coerce_args(args, &have, Some(&want))
+            }
+            None => args,
+        };
         self.instance_method(o, t, name, args, line, errors)
     }
 
@@ -1218,6 +1488,16 @@ impl Cx<'_> {
     fn instance_method(&self, o: Expr, t: String, name: String, mut args: Vec<Expr>, line: usize, errors: &mut Vec<Error>) -> (Expr, Option<String>) {
         let call = |name: String, args: Vec<Expr>| Expr::Call(Call { name, args });
         let several = self.types.several(&t);
+        if self.classes {
+            let root = self.types.root(&t).to_string();
+            match name.as_str() {
+                "destroy" | "deallocate" if self.types.method(&t, &name).is_none() => return (call(format!("s__{root}__{name}"), vec![o]), None),
+                "getType" if self.types.method(&t, &name).is_none() => {
+                    return (Expr::Method(Box::new(MethodCall { object: o, name: "wcb__type".into(), args: vec![] })), Some("integer".into()));
+                }
+                _ => {}
+            }
+        }
         match name.as_str() {
             "destroy" if several => {
                 return (call(format!("s__{}__destroy", self.types.root(&t)), vec![o]), None);
@@ -1248,6 +1528,12 @@ impl Cx<'_> {
         };
         let returns = x.returns.clone();
         let is_static = x.is_static;
+        if self.classes {
+            return match is_static {
+                true => (call(owner.method(&name), args), returns),
+                false => (Expr::Method(Box::new(MethodCall { object: o, name: class_method(&name, &owner.name), args })), returns),
+            };
+        }
         if !is_static {
             args.insert(0, o);
         }
