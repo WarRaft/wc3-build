@@ -15,6 +15,10 @@
 //!   `runtextmacro`s run too; `optional`: nothing when there's no such
 //!   macro.
 //! - `//! novjass` ... `//! endnovjass`: left out.
+//! - `//! external NAME args`, `//! externalblock [extension=x] NAME args`
+//!   ... `//! i line` ... `//! endexternalblock`: a tool to run on the map
+//!   built ([`crate::ir::External`]), the block's `//! i` lines its input
+//!   (the rest of the block left out); the caller runs them.
 //!
 //! Each line made keeps where it comes from: a macro's, the line of the
 //! `runtextmacro` (the outermost) that put it there; so what's said of
@@ -22,7 +26,7 @@
 
 use std::collections::HashMap;
 
-use crate::ir::{Error, Origin};
+use crate::ir::{Error, External, Origin};
 
 /// Where `//! import "path"` in the file `from` leads: the file's name
 /// (what its code is said to come from) and text; `None` when there's
@@ -39,6 +43,22 @@ pub struct Expanded {
     /// The index of the file it was imported by (`None`: given, not
     /// imported), for its dialect.
     pub imported_by: Option<usize>,
+    /// Its `//! external`s, in order.
+    pub externals: Vec<External>,
+}
+
+/// An `//! external`'s or `//! externalblock`'s head (`[extension=x] NAME
+/// args`): the extension, the tool, its arguments.
+fn external_head(head: &str) -> Option<(Option<String>, String, String)> {
+    let mut rest = head.trim();
+    let mut extension = None;
+    if let Some(r) = rest.strip_prefix("extension=") {
+        let (ext, after) = r.split_once(char::is_whitespace).unwrap_or((r, ""));
+        extension = Some(ext.trim_start_matches('.').to_string());
+        rest = after.trim();
+    }
+    let (tool, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    (!tool.is_empty()).then(|| (extension, tool.to_string(), args.trim().to_string()))
 }
 
 /// A macro.
@@ -132,8 +152,10 @@ pub fn expand(files: &[(&str, &str)], import: &Import) -> Result<Vec<Expanded>, 
     let mut macros: HashMap<String, Macro> = HashMap::new();
     let mut loaded = 0;
     let mut kept: Vec<Vec<(String, usize)>> = Vec::new();
+    let mut externals: Vec<Vec<External>> = Vec::new();
     for (name, text, _) in &all {
         let mut own = Vec::new();
+        let mut tools = Vec::new();
         // An `//! inject` open: what it replaces, and its line.
         let mut injecting: Option<(String, usize)> = None;
         let mut lines = text.lines().enumerate();
@@ -241,6 +263,41 @@ pub fn expand(files: &[(&str, &str)], import: &Import) -> Result<Vec<Expanded>, 
                         Err(e) => errors.push(error(name, i + 1, format!("`//! loaddata \"{path}\"`: {e}"))),
                     }
                 }
+                // A tool run on the map built: the caller's.
+                "external" => match external_head(&d[word.len()..]) {
+                    Some((None, tool, args)) => tools.push(External { tool, args, input: None, extension: None, origin: Origin { file: name.clone(), line: i + 1 } }),
+                    Some((Some(_), _, _)) => errors.push(error(name, i + 1, "`extension=` is an `//! externalblock`'s".into())),
+                    None => errors.push(error(name, i + 1, "`//! external` needs a tool's name".into())),
+                },
+                "externalblock" => {
+                    let head = external_head(&d[word.len()..]);
+                    let mut input = String::new();
+                    let mut closed = false;
+                    for (_, l) in lines.by_ref() {
+                        match directive(l) {
+                            Some("endexternalblock") => {
+                                closed = true;
+                                break;
+                            }
+                            // `//! i text`: the `i` and one space after it off.
+                            Some(d) if d == "i" || d.starts_with("i ") => {
+                                let after = l.trim_start().strip_prefix("//!").unwrap_or("").trim_start();
+                                let text = after.strip_prefix('i').unwrap_or("");
+                                input.push_str(text.strip_prefix(' ').unwrap_or(text));
+                                input.push('\n');
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !closed {
+                        errors.push(error(name, i + 1, "`//! externalblock` has no `//! endexternalblock`".into()));
+                    }
+                    match head {
+                        Some((extension, tool, args)) => tools.push(External { tool, args, input: Some(input), extension, origin: Origin { file: name.clone(), line: i + 1 } }),
+                        None => errors.push(error(name, i + 1, "`//! externalblock` needs a tool's name".into())),
+                    }
+                }
+                "endexternalblock" => errors.push(error(name, i + 1, "`//! endexternalblock` without its `//! externalblock`".into())),
                 // Read already.
                 "import" => {}
                 _ => own.push((line.to_string(), i + 1)),
@@ -250,17 +307,18 @@ pub fn expand(files: &[(&str, &str)], import: &Import) -> Result<Vec<Expanded>, 
             errors.push(error(name, at, format!("`//! inject {what}` has no `//! endinject`")));
         }
         kept.push(own);
+        externals.push(tools);
     }
 
     // The macros run, in every file.
     let mut out = Vec::new();
-    for ((name, _, by), own) in all.iter().zip(kept) {
+    for (((name, _, by), own), externals) in all.iter().zip(kept).zip(externals) {
         let mut text = String::new();
         let mut lines = Vec::new();
         for (line, at) in own {
             run(&line, at, name, &macros, 0, &mut text, &mut lines, &mut errors);
         }
-        out.push(Expanded { name: name.clone(), text, lines, imported_by: *by });
+        out.push(Expanded { name: name.clone(), text, lines, imported_by: *by, externals });
     }
     if errors.is_empty() { Ok(out) } else { Err(errors) }
 }

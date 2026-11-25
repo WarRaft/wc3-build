@@ -64,6 +64,7 @@ pub fn module_with(files: &[(Source, jass_rs::Dialect)], import: &crate::preproc
         errs.iter_mut().for_each(|x| x.origin.line = line(x.origin.line));
         errors.extend(errs);
         m.append(one);
+        m.externals.extend(e.externals.iter().cloned());
     }
     if errors.is_empty() { Ok(m) } else { Err(errors) }
 }
@@ -75,12 +76,6 @@ fn one_file(m: &mut Module, f: &Source, fallback: jass_rs::Dialect, errors: &mut
             Ok(p) => crate::from_zinc::add(m, f, &p, errors),
             Err(e) => errors.push(Error { origin: Origin { file: f.name.into(), line: e.line }, message: e.message }),
         }
-        return;
-    }
-    // What JassHelper's preprocessor has that isn't run yet.
-    let directives = directives(f);
-    if !directives.is_empty() {
-        errors.extend(directives);
         return;
     }
     let dialect = jass_rs::lexer::Dialect::declared(f.text).unwrap_or(if f.name.to_ascii_lowercase().ends_with(".vj") { jass_rs::Dialect::VJass } else { fallback });
@@ -118,23 +113,6 @@ pub fn expr(text: &str) -> Result<Expr, String> {
         },
         _ => Err(format!("{text:?} isn't one expression")),
     }
-}
-
-/// JassHelper's preprocessor directives, which aren't read.
-/// JassHelper's directives not run yet (the rest are [`crate::preprocess`]'s).
-const DIRECTIVES: [&str; 1] = ["external"];
-
-/// Each of JassHelper's preprocessor directives in a file: an error.
-fn directives(f: &Source) -> Vec<Error> {
-    let mut out = Vec::new();
-    for (i, l) in f.text.lines().enumerate() {
-        let Some(rest) = l.trim_start().strip_prefix("//!") else { continue };
-        let word = rest.split_whitespace().next().unwrap_or("");
-        if DIRECTIVES.contains(&word) {
-            out.push(Error { origin: Origin { file: f.name.to_string(), line: i + 1 }, message: format!("JassHelper's `//! {word}` isn't read yet") });
-        }
-    }
-    out
 }
 
 fn add(m: &mut Module, f: &Source, p: &j::Program, errors: &mut Vec<Error>) {

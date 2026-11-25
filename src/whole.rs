@@ -77,6 +77,8 @@ pub struct Script {
     /// What's wrong with the script, which is made all the same
     /// ([`crate::jass::Built::problems`]).
     pub problems: Vec<Error>,
+    /// JassHelper's `//! external`s, to run on the map once it's written.
+    pub externals: Vec<crate::ir::External>,
 }
 
 /// The map's whole script, or why it can't be made.
@@ -116,6 +118,7 @@ pub fn script(input: &Input) -> Result<Script, Vec<Error>> {
     // All of it at once: JassHelper's textmacros run across files.
     let sources: Vec<(Source, jass_rs::Dialect)> = input.code.iter().map(|c| (Source { name: &c.name, text: &c.text }, c.dialect)).collect();
     let code = module_with(&sources, input.import)?;
+    let externals = code.externals.clone();
     let used: HashSet<String> = crate::map::used_names(&code);
     let duration = |f: &str| read(f).and_then(|b| crate::audio::duration_ms(&b));
 
@@ -142,7 +145,7 @@ pub fn script(input: &Input) -> Result<Script, Vec<Error>> {
     let scripts = input.script == crate::jass::Script::AngelScript;
     let (common_j, blizzard_j) = if scripts { (common_j, blizzard_j) } else { Default::default() };
     let built = crate::jass::build_with(&whole, &crate::jass::Options { uglify: input.uglify, optimize: input.optimize, game, script: input.script, common_j, blizzard_j })?;
-    Ok(Script { text: built.script, notes: built.notes, problems: built.problems })
+    Ok(Script { text: built.script, notes: built.notes, problems: built.problems, externals })
 }
 
 #[cfg(test)]

@@ -40,6 +40,27 @@ pub struct Module {
     pub function_types: Vec<FunctionType>,
     /// vJASS's hooks, as written.
     pub hooks: Vec<Hook>,
+    /// JassHelper's `//! external`s: tools run on the map once it's
+    /// built, in their order.
+    pub externals: Vec<External>,
+}
+
+/// JassHelper's `//! external NAME args` (`//! externalblock`: with the
+/// lines it sends): a tool the project names run on the map built, given
+/// the map's path, the lookup paths and `args`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct External {
+    /// The tool's name, as the project's `[external]` has it.
+    pub tool: String,
+    /// The rest of the line: the tool's own arguments (`$FILENAME$` where
+    /// the block's file goes).
+    pub args: String,
+    /// An `externalblock`'s lines (each `//! i` line's text, a line break
+    /// after each): the tool's input, or the file `$FILENAME$` names.
+    pub input: Option<String>,
+    /// `extension=`: the file's, for a tool that wants one.
+    pub extension: Option<String>,
+    pub origin: Origin,
 }
 
 /// vJASS's `hook Name Target`: before every call of `Name`, `Target` (a
@@ -706,6 +727,7 @@ impl Module {
         self.mixins.extend(other.mixins);
         self.function_types.extend(other.function_types);
         self.hooks.extend(other.hooks);
+        self.externals.extend(other.externals);
     }
 
     /// What of vJASS and Zinc the module still has, which only lowering

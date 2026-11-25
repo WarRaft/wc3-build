@@ -68,7 +68,24 @@ fn jasshelpers_preprocessor_run_first() {
     // A table that isn't there: an error of the preprocessor's.
     let errors = module(&[Source { name: "t.j", text: "// @dialect vjass\n//! loaddata \"x.slk\"\n" }]).unwrap_err();
     assert_eq!((errors[0].origin.line, errors[0].message.as_str()), (2, "`//! loaddata`: no file \"x.slk\""));
-    // What isn't run: an error each.
-    let errors = module(&[Source { name: "t.j", text: "// @dialect vjass\n\n//! external ObjectMerger\n" }]).unwrap_err();
-    assert_eq!((errors[0].origin.line, errors[0].message.as_str()), (3, "JassHelper's `//! external` isn't read yet"));
+    // Tools to run on the map: `external`, and a block with its input
+    // (the `i` and a space off each `//! i` line; the rest left out).
+    let text = concat!(
+        "// @dialect vjass\n\n//! external ObjectMerger w3u hfoo h000 unam \"Captain\"\n",
+        "//! externalblock extension=lua LuaMerger $FILENAME$ -v\n",
+        "//! i print(1)\n    // not sent\n//! i\n//!   i   two\n//! endexternalblock\n",
+        "function F takes nothing returns nothing\nendfunction\n",
+    );
+    let m = module(&[Source { name: "t.j", text }]).unwrap();
+    let got: Vec<_> = m.externals.iter().map(|e| (e.tool.as_str(), e.args.as_str(), e.input.as_deref(), e.extension.as_deref(), e.origin.line)).collect();
+    assert_eq!(got, [
+        ("ObjectMerger", "w3u hfoo h000 unam \"Captain\"", None, None, 3),
+        ("LuaMerger", "$FILENAME$ -v", Some("print(1)\n\n  two\n"), Some("lua"), 4),
+    ]);
+    // The code after the block is read, at its lines.
+    assert_eq!(m.functions[0].origin.line, 10);
+    let errors = module(&[Source { name: "t.j", text: "// @dialect vjass\n//! externalblock X\n//! i a\n" }]).unwrap_err();
+    assert_eq!((errors[0].origin.line, errors[0].message.as_str()), (2, "`//! externalblock` has no `//! endexternalblock`"));
+    let errors = module(&[Source { name: "t.j", text: "// @dialect vjass\n//! external\n" }]).unwrap_err();
+    assert_eq!(errors[0].message, "`//! external` needs a tool's name");
 }

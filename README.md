@@ -34,8 +34,14 @@ into it as code too.
   `//! endnovjass` (left out). Each line made keeps where it comes from:
   a macro's, the line of the `runtextmacro` that put it there, so what's
   said of the code is said of the lines written (`Module::map_lines`).
-  `//! inject`, `//! dovjassinit`, `//! loaddata`, `//! external` aren't
-  run yet: an error each, nothing lost quietly.
+  `//! inject main/config` ... `//! endinject` (a function of its own,
+  `//! dovjassinit` in it), `//! loaddata "x.slk"` (below);
+  `//! external NAME args` and `//! externalblock [extension=x] NAME
+  args` ... `//! i line` ... `//! endexternalblock`: a tool to run on the
+  map built (`ir::External`: the tool, its arguments, the block's `//!
+  i` lines, at its line), gathered into `Module::externals` and
+  `whole::Script::externals`; the caller (the wc3-rs server's build,
+  `[external]` of the project) runs them, as JassHelper does.
 - **`from_jass`**: JASS and vJASS files (parsed by `jass-rs`) into one
   module, in their order; a `.zn` file and a `//! zinc` block go to
   `from_zinc`. A statement outside a function is an error. A `static
@@ -407,8 +413,9 @@ struct), interface defaults `= value`; a struct's members written bare
 in its methods; `//! inject main/config` with `//! dovjassinit` (the
 injected `main` the map's, World Editor's replaced, the other `main`s
 `InitCustomTriggers`), `//! loaddata` (an SLK made `wcb__loaddata_<n>`,
-run after vJASS's initialization). What's left is in `wc3-rs`'s
-README, Open tasks.
+run after vJASS's initialization), `//! external` (run by the caller).
+The whole of JassHelper's manual is read and built. What's left is in
+`wc3-rs`'s README, Open tasks.
 
 `tests/real.rs` (ignored) builds real scripts: `JASS_GAME` (folders with
 the game's `common.j` and `Blizzard.j`) and `JASS_FILES` (each built
