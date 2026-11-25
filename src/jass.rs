@@ -153,6 +153,14 @@ pub fn build_with(m: &Module, options: &Options) -> Result<Built, Vec<Error>> {
         m.globals.extend(globals);
         m.functions = functions.into_iter().map(hoist_locals).collect();
     }
+    // The game's arrays have 8191 places; Lua's and AngelScript's none.
+    if options.script == Script::Jass {
+        let mut errors = Vec::new();
+        split_big_arrays(&mut m, &mut errors);
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+    }
     let mut notes = Vec::new();
     if options.uglify {
         notes = crate::uglify::uglify(&mut m).kept;
@@ -177,6 +185,128 @@ fn game_scripts(options: &Options) -> Result<(crate::angelscript::Common, Module
     let common = module_as(&[Source { name: "common.j", text: &options.common_j }], jass_rs::Dialect::Jass)?;
     let blizzard = if options.blizzard_j.is_empty() { Module::default() } else { module_as(&[Source { name: "Blizzard.j", text: &options.blizzard_j }], jass_rs::Dialect::Jass)? };
     Ok((crate::angelscript::Common::of(&common), blizzard))
+}
+
+/// The places of one of the game's arrays (JassHelper's: 8191, the last
+/// index being unsafe in saved games).
+pub const ARRAY_PLACES: i64 = 8191;
+
+/// Each global array sized past [`ARRAY_PLACES`] (a sized array, a struct
+/// with more index space, a 2D or dynamic array's storage) made of several
+/// of the game's: `a`, `a__1`, `a__2` ... of `ARRAY_PLACES` each, read
+/// through `wcb__ag_a(i)` and set through `wcb__as_a(i, v)` (first among
+/// the functions), each choosing its array by `i`, as JassHelper does.
+fn split_big_arrays(m: &mut Module, errors: &mut Vec<Error>) {
+    let mut big: HashMap<String, (String, i64)> = HashMap::new();
+    for g in m.globals.iter().filter(|g| g.array) {
+        let Some(size) = &g.size else { continue };
+        match m.const_int(size) {
+            Some(n) if n > crate::structs::MAX_SPACE => errors.push(Error { origin: g.origin.clone(), message: format!("{}[{n}]: an array has at most {} places (50 of the game's)", g.name, crate::structs::MAX_SPACE) }),
+            Some(n) if n > ARRAY_PLACES => {
+                big.insert(g.name.clone(), (g.ty.clone(), (n + ARRAY_PLACES - 1) / ARRAY_PLACES));
+            }
+            Some(_) => {}
+            None => errors.push(Error { origin: g.origin.clone(), message: format!("{}'s size isn't a number known before the game runs (a literal or a constant)", g.name) }),
+        }
+    }
+    if big.is_empty() {
+        return;
+    }
+    let mut names: Vec<&String> = big.keys().collect();
+    names.sort();
+    let mut accessors = Vec::new();
+    for name in names {
+        let (ty, k) = &big[name];
+        let part = |c: i64| if c == 0 { name.clone() } else { format!("{name}__{c}") };
+        let origin = m.globals.iter().find(|g| &g.name == name).map(|g| g.origin.clone()).expect("a global");
+        for c in 1..*k {
+            let mut g = Global::new(part(c), ty.clone(), None, origin.clone());
+            g.array = true;
+            m.globals.push(g);
+        }
+        // `i` in the array `c`, from its start.
+        let at = |c: i64| if c == 0 { Expr::var("i") } else { Expr::binary(Expr::var("i"), BinOp::Sub, Expr::int(c * ARRAY_PLACES)) };
+        let below = |c: i64| Expr::binary(Expr::var("i"), BinOp::Lt, Expr::int((c + 1) * ARRAY_PLACES));
+        let mut get = Vec::new();
+        let mut set = Vec::new();
+        for c in 0..*k {
+            let read = Stmt::Return { value: Some(Expr::Index(part(c), Box::new(at(c)))), line: 0 };
+            let write = vec![Stmt::set_at(part(c), at(c), Expr::var("v")), Stmt::Return { value: None, line: 0 }];
+            if c + 1 < *k {
+                get.push(Stmt::If { branches: vec![(below(c), vec![read])], otherwise: None, line: 0 });
+                set.push(Stmt::If { branches: vec![(below(c), write)], otherwise: None, line: 0 });
+            } else {
+                get.push(read);
+                set.extend(write.into_iter().take(1));
+            }
+        }
+        let mut g = Function::new(format!("{PREFIX}ag_{name}"), get, origin.clone());
+        g.sig.params = vec![Param { ty: "integer".into(), name: "i".into() }];
+        g.sig.returns = Some(ty.clone());
+        let mut s = Function::new(format!("{PREFIX}as_{name}"), set, origin);
+        s.sig.params = vec![Param { ty: "integer".into(), name: "i".into() }, Param { ty: ty.clone(), name: "v".into() }];
+        accessors.push(g);
+        accessors.push(s);
+    }
+    for f in &mut m.functions {
+        let mut own: HashSet<String> = f.sig.params.iter().map(|p| p.name.clone()).collect();
+        locals_of(&f.body, &mut |n| {
+            own.insert(n.to_string());
+        });
+        let big: HashSet<&str> = big.keys().map(String::as_str).filter(|n| !own.contains(*n)).collect();
+        through_accessors(&mut f.body, &big);
+    }
+    accessors.append(&mut m.functions);
+    m.functions = accessors;
+}
+
+/// Reads and sets of the arrays `big` in `body` made calls of their
+/// accessors ([`split_big_arrays`]).
+fn through_accessors(body: &mut [Stmt], big: &HashSet<&str>) {
+    fn expr(e: &mut Expr, big: &HashSet<&str>) {
+        for x in e.children_mut() {
+            expr(x, big);
+        }
+        if let Expr::Index(n, i) = e
+            && big.contains(n.as_str())
+        {
+            *e = Expr::call(format!("{PREFIX}ag_{n}"), vec![std::mem::replace(&mut **i, Expr::int(0))]);
+        }
+    }
+    for s in body {
+        match s {
+            Stmt::Local { init, .. } => init.iter_mut().for_each(|e| expr(e, big)),
+            Stmt::Set { name, index, value, line } => {
+                index.iter_mut().for_each(|e| expr(e, big));
+                expr(value, big);
+                if big.contains(name.as_str())
+                    && let Some(i) = index.take()
+                {
+                    let v = std::mem::replace(value, Expr::int(0));
+                    *s = Stmt::Call { call: Call { name: format!("{PREFIX}as_{name}"), args: vec![i, v] }, line: *line };
+                }
+            }
+            Stmt::Call { call, .. } => call.args.iter_mut().for_each(|a| expr(a, big)),
+            Stmt::If { branches, otherwise, .. } => {
+                for (c, b) in branches.iter_mut() {
+                    expr(c, big);
+                    through_accessors(b, big);
+                }
+                if let Some(b) = otherwise {
+                    through_accessors(b, big);
+                }
+            }
+            Stmt::Loop { body, .. } => through_accessors(body, big),
+            Stmt::ExitWhen { cond, .. } => expr(cond, big),
+            Stmt::Return { value, .. } => value.iter_mut().for_each(|e| expr(e, big)),
+            Stmt::Debug { stmt, .. } => through_accessors(std::slice::from_mut(&mut **stmt), big),
+            other => {
+                let (es, bs) = other.oop_parts_mut();
+                es.into_iter().for_each(|e| expr(e, big));
+                bs.into_iter().for_each(|b| through_accessors(b, big));
+            }
+        }
+    }
 }
 
 /// Is `f` a `main` or a `config` the build merges?

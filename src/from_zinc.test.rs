@@ -167,5 +167,6 @@ fn arrays_of_several_dimensions_are_one() {
 fn what_isnt_read_is_an_error() {
     let errors = module(&[Source { name: "d.zn", text: "integer grid[2][];\ninteger ok[2][2];\nfunction F() { ok[1] = 0; }\ninteger big[100][100];\n" }]).unwrap_err();
     let messages: Vec<(usize, &str)> = errors.iter().map(|e| (e.origin.line, e.message.as_str())).collect();
-    assert_eq!(messages, [(1, "grid: every size of an array of several dimensions but the first must be given"), (3, "ok has 2 dimensions: as many indices"), (4, "big: 10000 cells, past a JASS array's 8192")]);
+    // `big` (10000 cells) is several of the game's arrays: no error.
+    assert_eq!(messages, [(1, "grid: every size of an array of several dimensions but the first must be given"), (3, "ok has 2 dimensions: as many indices")]);
 }

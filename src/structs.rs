@@ -65,6 +65,10 @@ use crate::ir::*;
 /// Instances a struct has without a size.
 const DEFAULT_SIZE: i64 = 8191;
 
+/// The most index space a family or an array can have: 50 of the game's
+/// arrays (JassHelper's is about 408000).
+pub(crate) const MAX_SPACE: i64 = 50 * 8191;
+
 /// A field: its type, whether static, an instance's array's size,
 /// whether an array.
 type FieldInfo = (String, bool, Option<i64>, bool);
@@ -130,6 +134,16 @@ struct Types {
     functions: HashMap<String, Signature>,
     /// Each family of several (its root): its structs, by their types.
     families: HashMap<String, Vec<String>>,
+    /// Each root's index space (its `[size]`; 8191 without), for every
+    /// struct of its family and its arrays.
+    space: HashMap<String, i64>,
+}
+
+impl Types {
+    /// The index space of `t`'s family.
+    fn space_of(&self, t: &str) -> i64 {
+        self.space.get(self.root(t)).copied().unwrap_or(DEFAULT_SIZE)
+    }
 }
 
 impl Types {
@@ -258,11 +272,6 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
     }
     for s in &structs {
         let err = |errors: &mut Vec<Error>, what: &str| errors.push(Error { origin: s.origin.clone(), message: format!("struct {}: {what} isn't built into JASS yet", s.name) });
-        match s.size.as_ref().map(literal_int) {
-            Some(Some(n)) if n > DEFAULT_SIZE && !classes => err(errors, "more than 8190 instances"),
-            Some(None) => err(errors, "a size that isn't a number"),
-            _ => {}
-        }
         let parent = s.extends.clone().filter(|e| e != "array");
         let mut info =
             Info { name: s.name.clone(), interface: false, array: s.extends.as_deref() == Some("array"), parent, fields: HashMap::new(), methods: HashMap::new(), delegates: Vec::new(), typeid: 0 };
@@ -306,7 +315,23 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
         }
     }
     let functions: HashMap<String, Signature> = std::mem::take(&mut m.function_types).into_iter().map(|t| (t.sig.name.clone(), t.sig)).collect();
-    let mut types = Types { infos, functions, families: HashMap::new() };
+    // Index space: the root's `[size]`, a constant; a child's can't have one.
+    let mut space = HashMap::new();
+    for (name, size, origin, parent) in structs.iter().map(|s| (&s.name, &s.size, &s.origin, s.extends.as_deref().filter(|e| *e != "array"))).chain(interfaces.iter().map(|i| (&i.name, &i.size, &i.origin, None))) {
+        let Some(size) = size else { continue };
+        if parent.is_some() {
+            errors.push(Error { origin: origin.clone(), message: format!("{name}[...]: a struct extending another has its family's index space (its root's), none of its own") });
+            continue;
+        }
+        match m.const_int(size) {
+            Some(n) if (1..=MAX_SPACE).contains(&n) => {
+                space.insert(name.clone(), n);
+            }
+            Some(n) => errors.push(Error { origin: origin.clone(), message: format!("{name}[{n}]: an index space is from 1 to {MAX_SPACE} (50 of the game's arrays)") }),
+            None => errors.push(Error { origin: origin.clone(), message: format!("{name}'s index space isn't a number known before the game runs (a literal or a constant)") }),
+        }
+    }
+    let mut types = Types { infos, functions, families: HashMap::new(), space };
     // Families of several: an interface's, a struct's with children.
     let mut members: HashMap<String, Vec<String>> = HashMap::new();
     for s in &structs {
@@ -567,6 +592,28 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
         }
         return Lowered { inits, setup };
     }
+    // More index space than an array has: each array of a family that
+    // big sized so (the JASS output splits it: `jass::split_big_arrays`).
+    let mut sized: HashMap<String, i64> = HashMap::new();
+    for info in types.infos.values() {
+        let n = types.space_of(&info.name);
+        if n <= DEFAULT_SIZE {
+            continue;
+        }
+        for (f, (_, is_static, k, _)) in &info.fields {
+            if !is_static {
+                sized.insert(info.field(f), n * k.unwrap_or(1));
+            }
+        }
+        let root = types.root(&info.name).to_string();
+        sized.insert(format!("si__{root}_V"), n);
+        sized.insert(types.type_global(&root), n);
+    }
+    for g in m.globals.iter_mut() {
+        if let Some(n) = sized.get(&g.name) {
+            g.size = Some(Expr::int(n));
+        }
+    }
     for (root, name) in dispatched.into_inner() {
         dispatcher(m, &types, &root, &name, &mut setup);
     }
@@ -820,7 +867,7 @@ fn allocator(m: &mut Module, types: &Types, structs: &[Struct], interfaces: &[In
         return;
     }
     let (free, last, next) = (format!("si__{root}_F"), format!("si__{root}_I"), format!("si__{root}_V"));
-    let size = structs.iter().find(|x| x.name == root).and_then(|x| x.size.as_ref()).and_then(literal_int).unwrap_or(DEFAULT_SIZE);
+    let size = types.space_of(&root);
     let o = s.origin.clone();
     let ne = |a: Expr, b: Expr| Expr::binary(a, BinOp::NotEq, b);
     let mut alloc = vec![

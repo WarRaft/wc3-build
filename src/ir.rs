@@ -158,6 +158,8 @@ pub struct Interface {
     pub owner: Owner,
     /// Its members: every struct extending it has them, as a parent's.
     pub fields: Vec<Field>,
+    /// Its family's index space (`interface A[20000]`), as written.
+    pub size: Option<Expr>,
     pub methods: Vec<Method>,
     pub origin: Origin,
 }
@@ -544,6 +546,54 @@ impl Function {
     /// A function taking and returning nothing, made where `origin` says.
     pub fn new(name: impl Into<String>, body: Vec<Stmt>, origin: Origin) -> Function {
         Function { sig: Signature { name: name.into(), params: Vec::new(), returns: None, constant: false }, body, owner: Owner::default(), origin }
+    }
+}
+
+/// The integer `e` is before the game runs: a literal (`12`, `$FF`,
+/// `0x1F`, `017`, `'A'`), a constant of `constants` (by name, its value),
+/// `+ - * /` of them, `-` before one; `None` otherwise.
+pub fn const_int(e: &Expr, constants: &dyn Fn(&str) -> Option<Expr>) -> Option<i64> {
+    fn go(e: &Expr, constants: &dyn Fn(&str) -> Option<Expr>, depth: usize) -> Option<i64> {
+        if depth > 32 {
+            return None;
+        }
+        match e {
+            Expr::Literal(t) => {
+                if let Some(code) = t.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')) {
+                    return Some(code.bytes().fold(0i64, |a, b| a * 256 + b as i64));
+                }
+                if let Some(h) = t.strip_prefix('$').or_else(|| t.strip_prefix("0x")).or_else(|| t.strip_prefix("0X")) {
+                    return i64::from_str_radix(h, 16).ok();
+                }
+                if t.len() > 1 && t.starts_with('0') {
+                    return i64::from_str_radix(&t[1..], 8).ok();
+                }
+                t.parse().ok()
+            }
+            Expr::Var(n) => go(&constants(n)?, constants, depth + 1),
+            Expr::Unary(UnaryOp::Neg, x) => go(x, constants, depth + 1).map(|v| -v),
+            Expr::Unary(UnaryOp::Plus, x) => go(x, constants, depth + 1),
+            Expr::Binary(a, op, b) => {
+                let (a, b) = (go(a, constants, depth + 1)?, go(b, constants, depth + 1)?);
+                match op {
+                    BinOp::Add => a.checked_add(b),
+                    BinOp::Sub => a.checked_sub(b),
+                    BinOp::Mul => a.checked_mul(b),
+                    BinOp::Div if b != 0 => Some(a / b),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+    go(e, constants, 0)
+}
+
+impl Module {
+    /// [`const_int`] over this module's constant globals.
+    pub fn const_int(&self, e: &Expr) -> Option<i64> {
+        let constants = |n: &str| self.globals.iter().find(|g| g.name == n && g.constant && !g.array).and_then(|g| g.init.clone());
+        const_int(e, &constants)
     }
 }
 

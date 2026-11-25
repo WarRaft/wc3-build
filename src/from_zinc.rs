@@ -136,7 +136,7 @@ impl Reader<'_> {
             }
             z::Member::Interface(t) => {
                 let (fields, methods, _) = self.members(&t.members);
-                let i = Interface { name: t.name.clone(), owner: self.owner(&t.modifiers), fields, methods, origin: self.origin(t.line) };
+                let i = Interface { name: t.name.clone(), owner: self.owner(&t.modifiers), fields, size: None, methods, origin: self.origin(t.line) };
                 self.m.interfaces.push(i);
             }
             z::Member::Module(t) => {
@@ -213,12 +213,9 @@ impl Reader<'_> {
                 let number = |e: &z::Expr| if let z::ExprKind::IntLiteral(n) = e.kind { Some(n) } else { None };
                 let size = first.as_ref().map(|f| match std::iter::once(f).chain(&rest).map(number).collect::<Option<Vec<i64>>>() {
                     Some(ns) => {
-                        let cells = ns.iter().product::<i64>();
-                        // A JASS array has 8192 cells.
-                        if cells > 8192 {
-                            self.error(v.line, &format!("{}: {cells} cells, past a JASS array's 8192", v.name));
-                        }
-                        Expr::int(cells)
+                        // Past a JASS array's places: several of them
+                        // (`jass::split_big_arrays`).
+                        Expr::int(ns.iter().product::<i64>())
                     }
                     None => rest.iter().fold(self.expr(f), |acc, d| Expr::binary(acc, BinOp::Mul, self.expr(d))),
                 });
@@ -260,7 +257,7 @@ impl Reader<'_> {
             name: v.name.clone(),
             ty: v.type_name.clone(),
             array: array.is_some(),
-            size: None,
+            size: array.clone().flatten(),
             constant: v.modifiers.is_constant,
             init: v.initializer.as_ref().map(|e| self.expr(e)),
             owner: self.owner(&v.modifiers),

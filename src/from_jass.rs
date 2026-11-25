@@ -228,7 +228,7 @@ impl Reader<'_> {
                 }
                 j::TopLevel::Interface(t) => {
                     let (fields, methods, _) = self.members(&t.members, scope);
-                    m.interfaces.push(Interface { name: t.name.clone(), owner: owner(scope, &t.modifiers), fields, methods, origin: self.origin(t.line) });
+                    m.interfaces.push(Interface { name: t.name.clone(), owner: owner(scope, &t.modifiers), fields, size: t.size.as_ref().map(|e| self.expr(e)), methods, origin: self.origin(t.line) });
                 }
                 j::TopLevel::Module(t) => {
                     let (fields, methods, mixins) = self.members(&t.members, scope);

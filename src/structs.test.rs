@@ -798,3 +798,51 @@ endfunction
     // `.exists`: rectangle has msg from the defaults only, circle its own.
     assert!(out.contains("if si__withpos_type[w] == 2 then"), "{out}");
 }
+
+#[test]
+fn more_index_space_than_an_array() {
+    let out = build(&[(
+        "t.j",
+        r#"// @dialect vjass
+globals
+    constant integer Q = 20000
+    integer array myArray[Q]
+endglobals
+struct X[10000]
+    integer a[2]
+    integer b
+endstruct
+interface A[20000]
+    method f takes nothing returns nothing
+endinterface
+struct B extends A
+    method f takes nothing returns nothing
+    endmethod
+endstruct
+struct aBigOne extends array [20000]
+    integer a
+endstruct
+function test takes nothing returns nothing
+    local X x = X.create()
+    set myArray[19999] = myArray[5] + 1
+    set x.b = x.a[1]
+    set aBigOne[19990].a = 12
+endfunction
+"#,
+    )])
+    .unwrap();
+    // myArray: three of the game's arrays, through its accessors.
+    assert!(out.contains("integer array myArray__1") && out.contains("integer array myArray__2") && !out.contains("myArray__3"), "{out}");
+    assert!(out.contains("function wcb__ag_myArray takes integer i returns integer\nif i < 8191 then\nreturn myArray[i]\nendif\nif i < 16382 then\nreturn myArray__1[i - 8191]\nendif\nreturn myArray__2[i - 16382]\nendfunction"), "{out}");
+    assert!(out.contains("function wcb__as_myArray takes integer i, integer v returns nothing\nif i < 8191 then\nset myArray[i] = v\nreturn\nendif\nif i < 16382 then\nset myArray__1[i - 8191] = v\nreturn\nendif\nset myArray__2[i - 16382] = v\nendfunction"), "{out}");
+    assert!(out.contains("call wcb__as_myArray(19999, wcb__ag_myArray(5) + 1)"), "{out}");
+    // X: 10000 instances, its member a of 2 each in 20000 places.
+    assert!(out.contains("if this >= 10000 then"), "{out}");
+    assert!(out.contains("call wcb__as_s__X_b(x, wcb__ag_s__X_a(x * 2 + 1))"), "{out}");
+    // An interface's family and an array struct of 20000.
+    assert!(out.contains("integer array si__A_V__2"), "{out}");
+    assert!(out.contains("call wcb__as_s__aBigOne_a(19990, 12)"), "{out}");
+    // A child of its own index space: an error.
+    let e = build(&[("t.j", "// @dialect vjass\nstruct Y\nendstruct\nstruct X[10000] extends Y\nendstruct\n")]).unwrap_err();
+    assert!(e[0].contains("a struct extending another has its family's index space"), "{e:?}");
+}
