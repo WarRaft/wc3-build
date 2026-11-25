@@ -43,13 +43,14 @@ function Start() {
         "set i = n - 1\nloop\nexitwhen i < 0\nif i == 3 then\nexitwhen true\nelseif i > 5 then\nset s = s - 1\nelse\nset s = s * 2\nendif\nset i = i - 1\nendloop",
         "loop\nexitwhen not (s > 100 and i != 0)\nset s = s / 2\nendloop",
         "loop\nset s = s + 'hfoo'\nexitwhen not (s < 0)\nendloop",
-        "debug call BJDebugMsg(\"s: \" + I2S(s))",
         // The anonymous function, a function of its own above its user.
         "function wcb__anon_0 takes nothing returns nothing\nset total = Sum(4)\nendfunction",
         "call TimerStart(CreateTimer(), 1.0, false, function wcb__anon_0)",
     ] {
         assert!(out.contains(part), "{part}\nnot in:\n{out}");
     }
+    // `debug`: out of debug mode, as JassHelper builds.
+    assert!(!out.contains("BJDebugMsg(\"s: \""), "{out}");
 }
 
 #[test]

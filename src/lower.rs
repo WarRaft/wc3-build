@@ -62,6 +62,9 @@ pub fn lower_for(m: &Module, game: &[Signature], classes: bool) -> Result<Module
     let scopes = Scopes::of(&m);
     let present: HashSet<String> = m.libraries.iter().map(|l| l.name.clone()).collect();
     mixins(&mut m, &mut errors);
+    // After the modules are taken in: each struct's copy of a module's
+    // key is a key of its own.
+    keys(&mut m);
 
     // Every name a scope declares, to what it becomes.
     let mut declared: HashMap<(String, String), String> = HashMap::new();
@@ -189,6 +192,7 @@ pub fn lower_for(m: &Module, game: &[Signature], classes: bool) -> Result<Module
         let library = |n: &str| present.contains(n);
         let constant = |n: &str| constants.get(&r(n)).copied();
         f.body = static_ifs(std::mem::take(&mut f.body), &f.origin.file, &library, &constant, &mut errors);
+        scope_strings(&mut f.body, scope.as_deref(), &scopes, &own);
         names(&mut f.body, &r, &own, &ftypes);
         f.body.iter_mut().for_each(modulo_stmt);
         f.sig.name = r(&f.sig.name);
@@ -222,6 +226,7 @@ pub fn lower_for(m: &Module, game: &[Signature], classes: bool) -> Result<Module
             let library = |n: &str| present.contains(n);
             let constant = |n: &str| constants.get(&r(n)).copied();
             f.body = static_ifs(std::mem::take(&mut f.body), &f.origin.file, &library, &constant, &mut errors);
+            scope_strings(&mut f.body, scope.as_deref(), &scopes, &own);
             names(&mut f.body, &r, &own, &ftypes);
             f.body.iter_mut().for_each(modulo_stmt);
         }
@@ -335,7 +340,85 @@ pub fn lower_for(m: &Module, game: &[Signature], classes: bool) -> Result<Module
         }
     }
     apply_hooks(&mut m, hooks, game, &mut errors);
+    code_as_boolexpr(&mut m, game);
     if errors.is_empty() { Ok(m) } else { Err(errors) }
+}
+
+/// `function F` given to a native or a function of the game's scripts
+/// where it takes a `boolexpr` is `Condition(function F)`, as JassHelper
+/// casts it (its changelog, 0.A.0.0: "when using them as arguments for
+/// natives/bjfunc that take boolexpr").
+fn code_as_boolexpr(m: &mut Module, game: &[Signature]) {
+    let takes: HashMap<String, Vec<bool>> = game
+        .iter()
+        .chain(m.natives.iter().map(|n| &n.sig))
+        .filter(|s| s.params.iter().any(|p| p.ty == "boolexpr"))
+        .map(|s| (s.name.clone(), s.params.iter().map(|p| p.ty == "boolexpr").collect()))
+        .collect();
+    if takes.is_empty() {
+        return;
+    }
+    fn call(c: &mut Call, takes: &HashMap<String, Vec<bool>>) {
+        c.args.iter_mut().for_each(|a| expr(a, takes));
+        if let Some(bs) = takes.get(&c.name) {
+            for (a, b) in c.args.iter_mut().zip(bs) {
+                if *b && matches!(a, Expr::Code(_)) {
+                    *a = Expr::call("Condition", vec![a.clone()]);
+                }
+            }
+        }
+    }
+    fn expr(e: &mut Expr, takes: &HashMap<String, Vec<bool>>) {
+        if let Expr::Call(c) = e {
+            call(c, takes);
+            return;
+        }
+        for x in e.children_mut() {
+            expr(x, takes);
+        }
+    }
+    fn stmt(s: &mut Stmt, takes: &HashMap<String, Vec<bool>>) {
+        let mut each = |e: &mut Expr| expr(e, takes);
+        match s {
+            Stmt::Local { init, .. } => init.iter_mut().for_each(&mut each),
+            Stmt::Set { index, value, .. } => {
+                index.iter_mut().for_each(&mut each);
+                each(value);
+            }
+            Stmt::Call { call: c, .. } => call(c, takes),
+            Stmt::If { branches, otherwise, .. } => {
+                for (c, b) in branches {
+                    each(c);
+                    b.iter_mut().for_each(|s| stmt(s, takes));
+                }
+                if let Some(b) = otherwise {
+                    b.iter_mut().for_each(|s| stmt(s, takes));
+                }
+            }
+            Stmt::Loop { body, .. } => body.iter_mut().for_each(|s| stmt(s, takes)),
+            Stmt::ExitWhen { cond, .. } => each(cond),
+            Stmt::Return { value, .. } => value.iter_mut().for_each(each),
+            Stmt::Debug { stmt: s, .. } => stmt(s, takes),
+            other => {
+                let (es, bs) = other.oop_parts_mut();
+                es.into_iter().for_each(|e| expr(e, takes));
+                bs.into_iter().for_each(|b| b.iter_mut().for_each(|s| stmt(s, takes)));
+            }
+        }
+    }
+    for f in &mut m.functions {
+        f.body.iter_mut().for_each(|s| stmt(s, &takes));
+    }
+    for st in &mut m.structs {
+        for me in &mut st.methods {
+            me.function.body.iter_mut().for_each(|s| stmt(s, &takes));
+        }
+    }
+    for g in &mut m.globals {
+        if let Some(e) = &mut g.init {
+            expr(e, &takes);
+        }
+    }
 }
 
 /// The hooks (each a name, its target, where it's written), as JassHelper
@@ -701,6 +784,90 @@ fn static_ifs(body: Vec<Stmt>, file: &str, library: &dyn Fn(&str) -> bool, const
         }
     }
     out
+}
+
+/// vJASS's `SCOPE_PREFIX` and `SCOPE_PRIVATE` in a function of library or
+/// scope `scope` (JassHelper's manual): the strings its public and its
+/// private names begin with (`"Name_"`, as `declare` names them), unless
+/// a local or parameter has the name; a string joined to one is one string
+/// (`SCOPE_PRIVATE + "kol"`: `"Name__kol"`), so `ExecuteFunc` and a
+/// variable's event name it as a literal.
+fn scope_strings(body: &mut [Stmt], scope: Option<&str>, scopes: &Scopes, own: &HashSet<String>) {
+    let Some(s) = scope else { return };
+    let prefix = format!("\"{s}_\"");
+    let private = format!("\"{}__\"", scopes.path(s));
+    fn expr(e: &mut Expr, prefix: &str, private: &str, own: &HashSet<String>) {
+        for x in e.children_mut() {
+            expr(x, prefix, private, own);
+        }
+        match e {
+            Expr::Var(n) if n == "SCOPE_PREFIX" && !own.contains(n.as_str()) => *e = Expr::lit(prefix),
+            Expr::Var(n) if n == "SCOPE_PRIVATE" && !own.contains(n.as_str()) => *e = Expr::lit(private),
+            Expr::Binary(a, BinOp::Add, b) => {
+                let text = |x: &Expr| match x {
+                    Expr::Literal(t) if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') => Some(t[1..t.len() - 1].to_string()),
+                    _ => None,
+                };
+                if let (Some(x), Some(y)) = (text(a), text(b)) {
+                    *e = Expr::lit(format!("\"{x}{y}\""));
+                }
+            }
+            _ => {}
+        }
+    }
+    fn stmt(st: &mut Stmt, prefix: &str, private: &str, own: &HashSet<String>) {
+        let mut each = |e: &mut Expr| expr(e, prefix, private, own);
+        match st {
+            Stmt::Local { init, .. } => init.iter_mut().for_each(&mut each),
+            Stmt::Set { index, value, .. } => {
+                index.iter_mut().for_each(&mut each);
+                each(value);
+            }
+            Stmt::Call { call, .. } => call.args.iter_mut().for_each(each),
+            Stmt::If { branches, otherwise, .. } => {
+                for (c, b) in branches {
+                    each(c);
+                    b.iter_mut().for_each(|s| stmt(s, prefix, private, own));
+                }
+                if let Some(b) = otherwise {
+                    b.iter_mut().for_each(|s| stmt(s, prefix, private, own));
+                }
+            }
+            Stmt::Loop { body, .. } => body.iter_mut().for_each(|s| stmt(s, prefix, private, own)),
+            Stmt::ExitWhen { cond, .. } => each(cond),
+            Stmt::Return { value, .. } => value.iter_mut().for_each(each),
+            Stmt::Debug { stmt: s, .. } => stmt(s, prefix, private, own),
+            other => {
+                let (es, bs) = other.oop_parts_mut();
+                es.into_iter().for_each(|e| expr(e, prefix, private, own));
+                bs.into_iter().for_each(|b| b.iter_mut().for_each(|s| stmt(s, prefix, private, own)));
+            }
+        }
+    }
+    body.iter_mut().for_each(|st| stmt(st, &prefix, &private, own));
+}
+
+/// vJASS's `key`s (JassHelper's manual, Keys): each a constant integer of
+/// its own number, a global's or a struct's static member's (`private
+/// static key K`), from 1 in the order they're declared.
+fn keys(m: &mut Module) {
+    let mut next = 0;
+    let mut number = || {
+        next += 1;
+        Some(Expr::lit(next.to_string()))
+    };
+    for g in m.globals.iter_mut().filter(|g| g.ty == "key" && !g.array) {
+        g.ty = "integer".into();
+        g.constant = true;
+        g.init = number();
+    }
+    for f in m.structs.iter_mut().flat_map(|s| s.fields.iter_mut()) {
+        if f.ty == "key" && f.is_static && f.array.is_none() {
+            f.ty = "integer".into();
+            f.constant = true;
+            f.init = number();
+        }
+    }
 }
 
 /// Each `static if` around declarations: the branch its condition chooses

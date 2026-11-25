@@ -111,6 +111,9 @@ impl Info {
         match m.strip_prefix("operator ") {
             Some("[]") => format!("s__{n}__getindex"),
             Some("[]=") => format!("s__{n}__setindex"),
+            // A static one (`S[i]` of the type), named apart as JassHelper.
+            Some("static[]") => format!("s__{n}__staticgetindex"),
+            Some("static[]=") => format!("s__{n}__staticsetindex"),
             Some("<") => format!("s__{n}__lt"),
             Some(x) => match x.strip_suffix('=') {
                 Some(x) => format!("s__{n}__set_{x}"),
@@ -255,6 +258,32 @@ impl Types {
 /// of an object runs `wcb__x_S_m(x, ...)` (made here: it calls `x.m(...)`)
 /// as any function's `.execute`; `x.m.evaluate(...)` is `x.m(...)`.
 pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec<Error>) -> Lowered {
+    // A static `operator []` (`[]=`) is apart from the instances' one
+    // (`TableArray[16]`, `ta[5]`): `operator static[]`.
+    for st in &mut m.structs {
+        for me in st.methods.iter_mut().filter(|me| me.is_static) {
+            let n = &mut me.function.sig.name;
+            if n == "operator []" || n == "operator []=" {
+                *n = n.replacen("operator ", "operator static", 1);
+            }
+        }
+    }
+    // A member of type `thistype` (`private thistype parent`, a module's
+    // taken in) is of its struct's, everywhere from here.
+    for st in &mut m.structs {
+        for f in &mut st.fields {
+            if f.ty == "thistype" {
+                f.ty = st.name.clone();
+            }
+        }
+    }
+    for i in &mut m.interfaces {
+        for f in &mut i.fields {
+            if f.ty == "thistype" {
+                f.ty = i.name.clone();
+            }
+        }
+    }
     // A global's initial value and a member's default are set before any
     // code runs, so they can't use a struct (`pair.create()`): a constant,
     // or set it in an initializer.
@@ -300,7 +329,7 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
                 if f.is_static || f.array.is_some() {
                     err(errors, &format!("`delegate` {}, static or an array", f.name));
                 } else {
-                    info.delegates.push((f.name.clone(), f.ty.clone()));
+                    info.delegates.push((f.name.clone(), if f.ty == "thistype" { s.name.clone() } else { f.ty.clone() }));
                 }
             }
             let k = match &f.array {
@@ -314,7 +343,10 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
                 }
                 _ => None,
             };
-            info.fields.insert(f.name.clone(), (f.ty.clone(), f.is_static, k, f.array.is_some()));
+            // `thistype parent`: its struct (a module's field: the struct's
+            // that implements it).
+            let ty = if f.ty == "thistype" { s.name.clone() } else { f.ty.clone() };
+            info.fields.insert(f.name.clone(), (ty, f.is_static, k, f.array.is_some()));
         }
         for me in &s.methods {
             info.methods.insert(me.function.sig.name.clone(), method_info(me, &s.name));
@@ -710,6 +742,8 @@ pub(crate) fn class_method(m: &str, owner: &str) -> String {
     match m.strip_prefix("operator ") {
         Some("[]") => "wcb__getindex".into(),
         Some("[]=") => "wcb__setindex".into(),
+        Some("static[]") => "wcb__staticgetindex".into(),
+        Some("static[]=") => "wcb__staticsetindex".into(),
         Some("<") => "wcb__lt".into(),
         Some(x) => match x.strip_suffix('=') {
             Some(x) => format!("wcb__set_{x}"),
@@ -1002,7 +1036,9 @@ fn allocator(m: &mut Module, types: &Types, structs: &[Struct], interfaces: &[In
     let mut d = Function::new(info.method("deallocate"), taken(&root, give_back(&root)), o.clone());
     d.sig.params.push(Param { ty: "integer".into(), name: "this".into() });
     m.functions.push(d);
-    if !several {
+    // Its own `destroy` (calling `deallocate`) in place of the one made.
+    let own_destroy = s.methods.iter().any(|me| !me.is_static && me.function.sig.name == "destroy");
+    if !several && !own_destroy {
         let mut body = types.method(&s.name, "onDestroy").map(|(i, _)| vec![Stmt::call(i.method("onDestroy"), vec![this()])]).unwrap_or_default();
         body.extend(give_back(&root));
         let mut d = Function::new(info.method("destroy"), taken(&root, body), o);
@@ -1411,8 +1447,16 @@ impl Cx<'_> {
         if self.sigs.contains_key(name) || self.types.infos.contains_key(name) || name == "thistype" {
             return None;
         }
-        let (_, x) = self.types.method(current, name)?;
-        Some(if x.is_static { Expr::var(current) } else { Expr::var("this") })
+        if let Some((_, x)) = self.types.method(current, name) {
+            return Some(if x.is_static { Expr::var(current) } else { Expr::var("this") });
+        }
+        // What every struct has without writing it: `deallocate()` of this
+        // instance, `allocate()` of the struct.
+        match name {
+            "deallocate" | "destroy" => Some(Expr::var("this")),
+            "allocate" | "create" => Some(Expr::var(current)),
+            _ => None,
+        }
     }
 
     /// The dynamic array type `t` is, if it's one.
@@ -1602,13 +1646,18 @@ impl Cx<'_> {
 
     /// Has `t` (or a parent) the operator `op` (`x`, `x=`, `[]`, `[]=`, `<`)?
     fn has_operator(&self, t: &str, op: &str) -> bool {
-        self.types.infos.contains_key(t) && self.types.method(t, &format!("operator {op}")).is_some()
+        self.types.infos.contains_key(t)
+            && (self.types.method(t, &format!("operator {op}")).is_some() || self.types.method(t, &format!("operator static{op}")).is_some())
     }
 
     /// A call of `t`'s operator `op` (which it has), of `instance` but for
     /// a static one.
     fn operator(&self, t: &str, instance: Option<Expr>, op: &str, mut args: Vec<Expr>, line: usize, errors: &mut Vec<Error>) -> (Expr, Option<String>) {
-        let name = format!("operator {op}");
+        // Of the type (no instance): its static one, if it has one; of an
+        // instance: the instances' one, if it has one.
+        let (own, other) = (format!("operator {op}"), format!("operator static{op}"));
+        let first = if instance.is_none() { [&other, &own] } else { [&own, &other] };
+        let name = first.into_iter().find(|n| self.types.method(t, n).is_some()).expect("has_operator").clone();
         let (owner, x) = self.types.method(t, &name).expect("has_operator");
         if self.is_class(t) && !x.is_static {
             return match instance {

@@ -320,15 +320,10 @@ impl Reader<'_> {
 
     fn stmts(&self, body: &[j::Stmt]) -> Vec<Stmt> {
         body.iter()
-            // A debug line the game has no debug form of (`debug local`,
-            // `debug return`: vJASS's) is taken out, as JassHelper does out
-            // of debug mode; `debug set` ... the game skips itself.
-            .filter(|s| match s {
-                j::Stmt::Debug { stmt, .. } => {
-                    matches!(&**stmt, j::Stmt::Set { .. } | j::Stmt::Call { .. } | j::Stmt::If { .. } | j::Stmt::Loop { .. } | j::Stmt::SetMember { .. } | j::Stmt::CallMethod { .. })
-                }
-                _ => true,
-            })
+            // Debug lines are taken out, as JassHelper does out of debug
+            // mode (a build isn't one: `DEBUG_MODE` is false): they may use
+            // a debug member, which is out too.
+            .filter(|s| !matches!(s, j::Stmt::Debug { .. }))
             .map(|s| self.stmt(s))
             .collect()
     }

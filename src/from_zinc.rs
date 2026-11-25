@@ -387,15 +387,8 @@ impl Reader<'_> {
                 let value = value.as_ref().map(|e| self.expr(e));
                 out.push(Stmt::Return { value, line: *line });
             }
-            z::Stmt::Debug { body, line } => {
-                for s in self.stmts(body) {
-                    if matches!(s, Stmt::Local { .. }) {
-                        self.error(*line, "a local in `debug`");
-                        continue;
-                    }
-                    out.push(Stmt::Debug { stmt: Box::new(s), line: *line });
-                }
-            }
+            // Out of debug mode (a build isn't one), as JassHelper does.
+            z::Stmt::Debug { .. } => {}
             z::Stmt::Block { body, .. } => {
                 for s in body {
                     self.stmt(s, out);

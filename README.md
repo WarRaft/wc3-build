@@ -392,6 +392,25 @@ with `inline=1` and `dead_code=1` (6 calls inlined, 53 functions and 66
 globals left out)
 and with `uglify=1` too: 0 problems (2026-11-25).
 
+three-corridors (`../maps`: 95 textmacros, 13 Zinc blocks, 43 libraries
+and 29 structs of Nestharus', Bribe's and BPower's: Table, Queue, Font,
+TextSplat ...) built from its sources by `wc3 build`: 0 problems, and so
+with `uglify=1`, `inline=1`, `dead_code=1` and `string_hash=1` (272
+StringHashes worked out, 485 calls inlined, 311 functions and 60
+globals left out; 7236 lines to 5629) (2026-11-25). What it taught, each
+as JassHelper does: `key`s are constant integers of their own
+(`lower::keys`, after modules are taken in); `function F` given to a
+native or a function of the game's scripts taking a `boolexpr` is
+`Condition(function F)`; a member of type `thistype` is of its struct's;
+a struct's own `destroy` replaces the one made, `deallocate()` and
+`allocate()` written bare are this one's and the struct's; a static
+`operator []` is `s__S__staticgetindex`, apart from the instances'
+`s__S__getindex`; `SCOPE_PREFIX` and `SCOPE_PRIVATE` are their scope's
+strings (joined to a literal: one literal); debug lines are taken out (a
+build isn't in debug mode); `static if` around declarations and among
+members is chosen by `DEBUG_MODE`, `LIBRARY_` and the library's
+constants.
+
 `tests/manual.rs` (ignored) runs every example of JassHelper's manual
 (`JASSHELPER_MANUAL`: its `topics` folder; a Zinc topic's as Zinc)
 through the editor's parser and the build, and writes what each says to

@@ -120,7 +120,7 @@ fn real_libraries_vjass_built() {
         "    elseif VERBOSE then\n",
         "        private function Say takes string s returns nothing\n            call BJDebugMsg(s)\n        endfunction\n",
         "    endif\n",
-        "    function Hello takes nothing returns nothing\n        call Say(\"hi\")\n    endfunction\n",
+        "    function Hello takes nothing returns nothing\n        call Say(\"hi\")\n        call ExecuteFunc(SCOPE_PRIVATE + \"Say\")\n        call BJDebugMsg(SCOPE_PREFIX)\n    endfunction\n",
         "endlibrary\n",
         "library Base\n    globals\n        constant boolean VERBOSE = true\n    endglobals\n",
         "    struct Node\n        debug boolean checked\n        integer v\n        static if VERBOSE then\n            static integer made = 0\n        else\n            static integer never = 0\n        endif\n",
@@ -142,6 +142,59 @@ fn real_libraries_vjass_built() {
     assert!(!out.contains("checked") && !out.contains("probe"), "{out}");
     // A member's static if: its library's constant chose.
     assert!(out.contains("made") && !out.contains("never"), "{out}");
+    // SCOPE_PRIVATE and SCOPE_PREFIX: the library's prefixes, joined.
+    assert!(out.contains("call ExecuteFunc(\"Tools__Say\")") && out.contains("function Tools__Say takes") && out.contains("call BJDebugMsg(\"Tools_\")"), "{out}");
     // A cast's element set: its `[]=`, of its `[]`.
     assert!(out.contains("call s__Node__setindex(this, 1, s__Node__getindex(this, 2))"), "{out}");
+}
+
+/// What three-corridors' libraries built had wrong, each as JassHelper
+/// builds it.
+#[test]
+fn three_corridors_as_jasshelper_builds_it() {
+    let text = concat!(
+        "// @dialect vjass\n",
+        "native TriggerAddCondition takes trigger whichTrigger, boolexpr condition returns triggercondition\n",
+        "native CreateTrigger takes nothing returns trigger\n",
+        "native Condition takes code func returns conditionfunc\n",
+        "library Lib\n",
+        "    globals\n        private key K\n        key L\n    endglobals\n",
+        "    struct List\n",
+        "        private thistype parent\n",
+        "        static method operator [] takes integer size returns List\n            return List.allocate()\n        endmethod\n",
+        "        method operator [] takes integer i returns integer\n            return i + K\n        endmethod\n",
+        "        method up takes nothing returns thistype\n            return parent\n        endmethod\n",
+        "        method destroy takes nothing returns nothing\n            set parent = 0\n            call deallocate()\n        endmethod\n",
+        "    endstruct\n",
+        "    private function Check takes nothing returns boolean\n        return true\n    endfunction\n",
+        "    function Go takes nothing returns integer\n",
+        "        local List l = List[16]\n",
+        "        call TriggerAddCondition(CreateTrigger(), function Check)\n",
+        "        call l.destroy()\n",
+        "        return l[2] + L\n",
+        "    endfunction\n",
+        "endlibrary\n",
+        "function main takes nothing returns nothing\n    call Go()\nendfunction\n",
+        "function config takes nothing returns nothing\nendfunction\n",
+    );
+    let m = crate::from_jass::module(&[crate::from_jass::Source { name: "t.j", text }]).unwrap_or_else(|e| panic!("{e:?}"));
+    let out = crate::jass::build(&m).unwrap_or_else(|e| panic!("{e:?}"));
+    crate::structs::tests::as_the_games(&out);
+    for part in [
+        // Keys: constant integers of their own.
+        "constant integer Lib__K = 1\n",
+        "constant integer L = 2\n",
+        // A thistype member: of its struct, an integer.
+        "integer array s__List_parent\n",
+        // The static operator apart from the instances'.
+        "local integer l = s__List__staticgetindex(16)\n",
+        "return s__List__getindex(l, 2) + L\n",
+        // Code where a native takes a boolexpr: a Condition.
+        "call TriggerAddCondition(CreateTrigger(), Condition(function Lib__Check))\n",
+        // Its own destroy, deallocate() of this.
+        "call s__List_deallocate(this)\n",
+    ] {
+        assert!(out.contains(part), "{part}---\n{out}");
+    }
+    assert_eq!(out.matches("function s__List_destroy takes").count(), 1, "{out}");
 }

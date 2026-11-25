@@ -404,7 +404,7 @@ endlibrary
         "function s__V__setindex takes integer this, integer i, integer v returns nothing",
         "function s__V__lt takes integer this, integer other returns boolean\nreturn s__V_raw[this] < s__V_raw[other]",
         "function s__V__get_count takes nothing returns integer",
-        "local integer k = s__ById__getindex(105)",
+        "local integer k = s__ById__staticgetindex(105)",
         "call s__V__set_x(a, 3)",
         "call s__V__set_x(b, s__V__get_x(a) + 1)",
         "call s__V__setindex(a, 2, s__V__getindex(a, 1))",
