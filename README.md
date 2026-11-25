@@ -349,14 +349,24 @@ Shape isn't built into JASS yet").
   over that frame's bit rate (so a variable bit rate file with a Xing
   frame comes out longer than it plays), an ID3v1 tag at its end taken for
   128 bytes more; rounded to the millisecond. The caller reads the file.
-- **`optimize`** (`jass::Options::optimize`, `[build] optimize=1`): as
-  JassHelper's, a one-line function's calls inlined where nothing can
-  change (each parameter read once and in order, calls after them, not a
-  `set` of a parameter, no local of the caller hiding a name the line
-  reads), then the functions and globals nothing reachable from `main`,
-  `config`, `ExecuteFunc("name")` or a class's methods uses left out
-  (every function kept when an `ExecuteFunc`'s name is told only as the
-  game runs); before names are shortened, for every output.
+- What a build does to the finished module, each by its own name
+  (`jass::Options`, `[build]`), in this order, before names are
+  shortened (`uglify`), for every output:
+  - **`string_hash`** (`string_hash=1`): `StringHash("text")` of a
+    literal the number the game gives: Storm's `SStrHash2` (pjass's
+    `sstrhash.c`, from the game): Jenkins' lookup2, seed 0, `a`-`z` as
+    `A`-`Z`, `/` as `\`. Only an ASCII literal shorter than its 1024-byte
+    buffer (how the game hashes what isn't ASCII changed with versions);
+    not when the code has a `StringHash` of its own. 10013 strings hash
+    the same as `sstrhash.c` compiled (`lookup2_against_c`).
+  - **`inline`** (`inline=1`): as JassHelper's, a one-line function's
+    calls inlined where nothing can change (each parameter read once and
+    in order, calls after them, not a `set` of a parameter, no local of
+    the caller hiding a name the line reads).
+  - **`dead_code`** (`dead_code=1`): the functions and globals nothing
+    reachable from `main`, `config`, `ExecuteFunc("name")` or a class's
+    methods uses left out (every function kept when an `ExecuteFunc`'s
+    name is told only as the game runs).
 - **`whole`**: a map's whole script (`whole::script`): the map's part
   made of its files, the code between its start and its end (the
   triggers' JASS, the map's custom script, the project's code, each with
@@ -378,7 +388,8 @@ types; calls only go up.
 `tests/real.rs`'s `built_scripts_check_clean` (ignored) reads scripts a
 build wrote (`BUILT_FILES`) as the game does, over `JASS_GAME`: no
 problem of names, types or `pure`'s. Diablo III beta's whole map built
-with `optimize=1` (6 calls inlined, 53 functions and 66 globals left out)
+with `inline=1` and `dead_code=1` (6 calls inlined, 53 functions and 66
+globals left out)
 and with `uglify=1` too: 0 problems (2026-11-25).
 
 `tests/manual.rs` (ignored) runs every example of JassHelper's manual

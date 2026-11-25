@@ -49,8 +49,12 @@ pub struct Input<'a> {
     pub code: Vec<Code>,
     /// Shorter names ([`crate::uglify`]).
     pub uglify: bool,
-    /// Inlining and dead code left out ([`crate::optimize`]).
-    pub optimize: bool,
+    /// One-line functions' calls inlined ([`crate::inline`]).
+    pub inline: bool,
+    /// What nothing reachable uses left out ([`crate::dead_code`]).
+    pub dead_code: bool,
+    /// `StringHash` of a literal worked out ([`crate::string_hash`]).
+    pub string_hash: bool,
     /// The language written ([`crate::jass::Script`]).
     pub script: crate::jass::Script,
     /// Where JassHelper's `//! import "path"` in a file of the code leads
@@ -144,7 +148,7 @@ pub fn script(input: &Input) -> Result<Script, Vec<Error>> {
     // AngelScript's: common.j's names in Jass::, what's used of Blizzard.j.
     let scripts = input.script == crate::jass::Script::AngelScript;
     let (common_j, blizzard_j) = if scripts { (common_j, blizzard_j) } else { Default::default() };
-    let built = crate::jass::build_with(&whole, &crate::jass::Options { uglify: input.uglify, optimize: input.optimize, game, script: input.script, common_j, blizzard_j })?;
+    let built = crate::jass::build_with(&whole, &crate::jass::Options { uglify: input.uglify, inline: input.inline, dead_code: input.dead_code, string_hash: input.string_hash, game, script: input.script, common_j, blizzard_j })?;
     Ok(Script { text: built.script, notes: built.notes, problems: built.problems, externals })
 }
 

@@ -4,7 +4,7 @@ use crate::jass::{Options, build_with};
 /// `text` built optimized, each line trimmed; read back as the game's JASS.
 fn optimized(text: &str) -> String {
     let m = module(&[Source { name: "t.j", text }]).unwrap_or_else(|e| panic!("{e:?}"));
-    let out = build_with(&m, &Options { optimize: true, ..Default::default() }).unwrap_or_else(|e| panic!("{e:?}")).script;
+    let out = build_with(&m, &Options { inline: true, dead_code: true, ..Default::default() }).unwrap_or_else(|e| panic!("{e:?}")).script;
     crate::structs::tests::as_the_games(&out);
     out.lines().map(str::trim).collect::<Vec<_>>().join("\n")
 }

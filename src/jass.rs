@@ -49,8 +49,12 @@ pub struct Options {
     pub game: Vec<Signature>,
     /// The language written ([`Script`]).
     pub script: Script,
-    /// Inlining and dead code left out ([`crate::optimize`]).
-    pub optimize: bool,
+    /// One-line functions' calls inlined ([`crate::inline`]).
+    pub inline: bool,
+    /// What nothing reachable uses left out ([`crate::dead_code`]).
+    pub dead_code: bool,
+    /// `StringHash` of a literal worked out ([`crate::string_hash`]).
+    pub string_hash: bool,
     /// The game's `common.j` and `Blizzard.j` as text, for AngelScript
     /// ([`crate::angelscript`]): `common.j`'s names are in `Jass::`, and
     /// what the code uses of `Blizzard.j` is written with it.
@@ -156,9 +160,18 @@ pub fn build_with(m: &Module, options: &Options) -> Result<Built, Vec<Error>> {
         m.functions = functions.into_iter().map(hoist_locals).collect();
     }
     let mut notes = Vec::new();
-    if options.optimize {
-        let r = crate::optimize::optimize(&mut m);
-        notes.push(format!("optimized: {} call(s) inlined, {} function(s) and {} global(s) nothing uses left out", r.inlined, r.functions, r.globals));
+    // Each as the build asks, in this order: a hash worked out first (what
+    // it was a call of may be left out then), inlining before what's left
+    // unused is.
+    if options.string_hash {
+        notes.push(format!("string_hash: {} StringHash(\"...\") worked out", crate::string_hash::hash_strings(&mut m)));
+    }
+    if options.inline {
+        notes.push(format!("inline: {} call(s) inlined", crate::inline::inline(&mut m)));
+    }
+    if options.dead_code {
+        let (f, g) = crate::dead_code::dead_code(&mut m);
+        notes.push(format!("dead_code: {f} function(s) and {g} global(s) nothing uses left out"));
     }
     // The game's arrays have 8191 places; Lua's and AngelScript's none.
     if options.script == Script::Jass {

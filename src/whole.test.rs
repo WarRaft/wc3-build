@@ -1,7 +1,7 @@
 use super::*;
 
 fn files(read: &dyn Fn(&str) -> Option<Vec<u8>>, code: Vec<(&str, &str)>) -> Result<Script, Vec<Error>> {
-    script(&Input { read, read_patched: &|_| None, variables: Vec::new(), initialization: vec!["gg_trg_Hello".into()], code: code.into_iter().map(|(n, t)| Code { name: n.into(), text: t.into(), dialect: jass_rs::Dialect::VJass }).collect(), uglify: false, optimize: false, script: Default::default(), import: &|_, _| None })
+    script(&Input { read, read_patched: &|_| None, variables: Vec::new(), initialization: vec!["gg_trg_Hello".into()], code: code.into_iter().map(|(n, t)| Code { name: n.into(), text: t.into(), dialect: jass_rs::Dialect::VJass }).collect(), uglify: false, inline: false, dead_code: false, string_hash: false, script: Default::default(), import: &|_, _| None })
 }
 
 #[test]

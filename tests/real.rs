@@ -84,7 +84,7 @@ fn real_folder() {
 }
 
 /// Built scripts (`BUILT_FILES`, a path list: a map's `war3map.j` as a
-/// build wrote it, optimized or not) read as the game reads them: no
+/// build wrote it, inlined, its dead code left out or not) read as the game reads them: no
 /// problem of names, types or `pure`'s over `JASS_GAME`.
 #[test]
 #[ignore]
