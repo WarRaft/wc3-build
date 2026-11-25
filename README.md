@@ -210,9 +210,10 @@ Shape isn't built into JASS yet").
   b` is `b < a`, `<=` and `>=` the other's `not`). A `delegate` field
   gives its struct what its type has: `a.x` and `a.m()` of a struct
   without them are `a.d.x` and `a.d.m()`, through a delegate's own
-  delegates too. Not lowered yet (errors): an operator of an interface
-  or a `stub` one, a static `delegate` or an array of them, more than
-  8190 instances.
+  delegates too; an operator of an interface or a `stub` one by the
+  instance's type, as a method (`wcb__d_R_wcb__getindex`, named as the
+  class's operator). Not lowered yet (errors): a static `delegate` or an
+  array of them.
 
 - **`map`**: the map's own part of its script, out of its files, as World
   Editor makes it, made as the IR's nodes (`ir`'s `Expr::call`,

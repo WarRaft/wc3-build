@@ -53,9 +53,10 @@
 //!
 //! What a name is (`c.value`: which struct's) comes from the types:
 //! parameters, locals, globals, fields, what functions and methods
-//! return. Not lowered yet (an error each): an operator of an interface
-//! or a `stub` one, a `delegate` static or an array, a struct of more
-//! than 8190 instances.
+//! return. Not lowered yet (an error each): a `delegate` static or an
+//! array. An operator of an interface or a `stub` one goes by the
+//! instance's type as a method does (its dispatcher named as the class's
+//! operator: `wcb__d_R_wcb__getindex`).
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -316,9 +317,6 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
             info.fields.insert(f.name.clone(), (f.ty.clone(), f.is_static, k, f.array.is_some()));
         }
         for me in &s.methods {
-            if me.function.sig.name.starts_with("operator") && me.stub {
-                err(errors, &format!("`stub method {}`", me.function.sig.name));
-            }
             info.methods.insert(me.function.sig.name.clone(), method_info(me, &s.name));
         }
         if info.array {
@@ -1080,6 +1078,12 @@ fn register(setup: &mut Vec<Stmt>, triggers: &str, typeid: usize, thunk: &str) {
 /// `wcb__d_R_m`: the call of `m` by the instance's type, the arguments
 /// through globals; each type's trigger, whose condition calls its
 /// struct's method.
+/// A method's name in the names of its dispatcher (`wcb__d_R_<part>`): an
+/// operator's as its class's (`wcb__getindex`, `wcb__set_x` ...).
+fn dispatch_part(name: &str) -> String {
+    if name.starts_with("operator ") { class_method(name, "") } else { name.to_string() }
+}
+
 fn dispatcher(m: &mut Module, types: &Types, root: &str, name: &str, setup: &mut Vec<Stmt>) {
     // Its signature: the root's, else the first of the family's that has it.
     let Some((_, me)) = types.method(root, name).or_else(|| types.families[root].iter().find_map(|s| types.method(s, name))) else {
@@ -1087,9 +1091,10 @@ fn dispatcher(m: &mut Module, types: &Types, root: &str, name: &str, setup: &mut
     };
     let me = me.clone();
     let o = Origin::file("the build");
-    let triggers = format!("wcb__dt_{root}_{name}");
-    let arg = |k: usize| format!("wcb__da_{root}_{name}_{k}");
-    let ret = format!("wcb__dr_{root}_{name}");
+    let part = dispatch_part(name);
+    let triggers = format!("wcb__dt_{root}_{part}");
+    let arg = |k: usize| format!("wcb__da_{root}_{part}_{k}");
+    let ret = format!("wcb__dr_{root}_{part}");
     let mut t = Global::new(triggers.clone(), "trigger", None, o.clone());
     t.array = true;
     m.globals.push(t);
@@ -1115,7 +1120,7 @@ fn dispatcher(m: &mut Module, types: &Types, root: &str, name: &str, setup: &mut
     if me.returns.is_some() {
         body.push(Stmt::Return { value: Some(Expr::var(ret.clone())), line: 0 });
     }
-    let mut f = Function::new(format!("wcb__d_{root}_{name}"), body, o.clone());
+    let mut f = Function::new(format!("wcb__d_{root}_{part}"), body, o.clone());
     f.sig.params = params.clone();
     f.sig.returns = me.returns.clone();
     m.functions.push(f);
@@ -1132,7 +1137,7 @@ fn dispatcher(m: &mut Module, types: &Types, root: &str, name: &str, setup: &mut
             None => Stmt::Call { call, line: 0 },
         }];
         body.push(Stmt::Return { value: Some(Expr::lit("true")), line: 0 });
-        let thunk = format!("wcb__dthunk_{s}_{name}");
+        let thunk = format!("wcb__dthunk_{s}_{part}");
         let mut f = Function::new(thunk.clone(), body, o.clone());
         f.sig.returns = Some("boolean".into());
         m.functions.push(f);
@@ -1614,9 +1619,16 @@ impl Cx<'_> {
                 }
             };
         }
-        if self.types.dispatches(t, &name) {
-            self.error(errors, line, format!("{t}'s `operator {op}` by the instance's type (an interface's) isn't built into JASS yet"));
-            return (Expr::lit("0"), None);
+        // An interface's or a `stub` one: by the instance's type, as a method.
+        if !x.is_static && self.types.dispatches(t, &name) {
+            let Some(o) = instance else {
+                self.error(errors, line, format!("{t}'s `operator {op}`: an instance's"));
+                return (Expr::lit("0"), None);
+            };
+            let root = self.types.root(t).to_string();
+            self.dispatched.borrow_mut().insert((root.clone(), name.clone()));
+            args.insert(0, o);
+            return (Expr::Call(Call { name: format!("wcb__d_{root}_{}", dispatch_part(&name)), args }), x.returns.clone());
         }
         if !x.is_static {
             match instance {
@@ -2325,7 +2337,7 @@ impl Cx<'_> {
         if !is_static && self.types.dispatches(&t, &name) {
             let root = self.types.root(&t).to_string();
             self.dispatched.borrow_mut().insert((root.clone(), name.clone()));
-            return (call(format!("wcb__d_{root}_{name}"), args), returns);
+            return (call(format!("wcb__d_{root}_{}", dispatch_part(&name)), args), returns);
         }
         (call(owner.method(&name), args), returns)
     }

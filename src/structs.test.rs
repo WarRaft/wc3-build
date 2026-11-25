@@ -1054,3 +1054,49 @@ endfunction
     // Run after vJASS's initialization.
     assert!(out.contains("call InitBlizzard()\ncall wcb__loaddata_0()"), "{out}");
 }
+
+#[test]
+fn operators_by_the_instances_type() {
+    let out = build(&[(
+        "t.j",
+        r#"// @dialect vjass
+interface Seq
+    method operator [] takes integer i returns integer
+    method operator size takes nothing returns integer defaults 0
+endinterface
+struct Twice extends Seq
+    method operator [] takes integer i returns integer
+        return i * 2
+    endmethod
+    method operator size takes nothing returns integer
+        return 10
+    endmethod
+endstruct
+struct Ones extends Seq
+    method operator [] takes integer i returns integer
+        return 1
+    endmethod
+endstruct
+struct Base
+    stub method operator x takes nothing returns integer
+        return 1
+    endmethod
+endstruct
+struct Child extends Base
+    method operator x takes nothing returns integer
+        return 2
+    endmethod
+endstruct
+function F takes Seq s, Base b returns integer
+    return s[3] + s.size + b.x
+endfunction
+"#,
+    )])
+    .unwrap();
+    // Each through its family's dispatcher, named as the class's operator.
+    assert!(out.contains("return wcb__d_Seq_wcb__getindex(s, 3) + wcb__d_Seq_wcb__get_size(s) + wcb__d_Base_wcb__get_x(b)"), "{out}");
+    assert!(out.contains("function wcb__d_Seq_wcb__getindex takes integer this, integer i returns integer"), "{out}");
+    // Ones has no size: the interface's defaults.
+    assert!(out.contains("function wcb__dthunk_Twice_wcb__get_size takes nothing returns boolean") && !out.contains("wcb__dthunk_Ones_wcb__get_size"), "{out}");
+    assert!(out.contains("function wcb__dthunk_Child_wcb__get_x takes nothing returns boolean"), "{out}");
+}
