@@ -863,6 +863,17 @@ fn hoist_locals(mut f: Function) -> Function {
 
 // ------------------------------------------------------------- printing
 
+/// The game's JASS of `m` as it is, no build's steps (nothing merged,
+/// sorted or lowered): each function's locals at its top, its globals in a
+/// `globals` block when it has some. For a piece of code of its own, a
+/// trigger's made custom text (Convert to Custom Text).
+pub fn print_code(m: &Module) -> String {
+    let mut m = m.clone();
+    m.functions = std::mem::take(&mut m.functions).into_iter().map(hoist_locals).collect();
+    let text = print(&m);
+    if m.globals.is_empty() && m.types.is_empty() { text.replacen("globals\nendglobals\n", "", 1).trim_start_matches('\n').to_string() } else { text }
+}
+
 fn print(m: &Module) -> String {
     let mut out = String::new();
     for t in &m.types {
