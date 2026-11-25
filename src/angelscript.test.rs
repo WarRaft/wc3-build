@@ -405,3 +405,9 @@ endfunction
     }
     assert!(!out.contains("class playerdata"), "{out}");
 }
+
+#[test]
+fn an_objects_method_has_no_name() {
+    let e = angelscript_vjass("struct V\n    method m takes nothing returns nothing\n    endmethod\nendstruct\nfunction F takes nothing returns nothing\n    call ExecuteFunc(V.m.name)\nendfunction\n").unwrap_err();
+    assert!(e.iter().any(|m| m.contains("V.m.name") && m.contains("static method instead")), "{e:?}");
+}

@@ -273,6 +273,9 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
             }
             info.methods.insert(me.function.sig.name.clone(), method_info(me, &s.name));
         }
+        if info.array {
+            array_struct_rules(s, errors);
+        }
         infos.insert(s.name.clone(), info);
     }
     for s in &structs {
@@ -514,6 +517,30 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
         local_types_integer(&mut f.body, &|t| types.infos.contains_key(t) || types.functions.contains_key(t));
     }
     Lowered { inits, setup }
+}
+
+/// What JassHelper's manual says an array struct (`extends array`) can't
+/// have, its instances never allocated (Array structs): a member's default
+/// value, an array member, `onDestroy`. An error each.
+fn array_struct_rules(s: &Struct, errors: &mut Vec<Error>) {
+    let mut err = |what: String| errors.push(Error { origin: s.origin.clone(), message: format!("struct {} extends array: {what} (an array struct's instances are never allocated: JassHelper's manual, Array structs)", s.name) });
+    for f in s.fields.iter().filter(|f| !f.is_static) {
+        if f.init.is_some() {
+            err(format!("its member {} can't have a default value; it's zero, null or false", f.name));
+        }
+        if f.array.is_some() {
+            err(format!("its member {} can't be an array", f.name));
+        }
+    }
+    if s.methods.iter().any(|me| !me.is_static && me.function.sig.name == "onDestroy") {
+        err("it can't have onDestroy: nothing destroys its instances".into());
+    }
+}
+
+/// Why `what` (`allocate`, `create`, `destroy`, `deallocate`) isn't there
+/// for the array struct `s`.
+fn no_allocation(s: &str, what: &str) -> String {
+    format!("{s}.{what}: {s} extends array, whose instances are never allocated or destroyed: an index is an instance ({s}[i]); a `create` of its own if it needs one (JassHelper's manual, Array structs)")
 }
 
 /// The function an object's method `.execute` runs (classes'): it takes
@@ -991,6 +1018,15 @@ impl Cx<'_> {
         }
     }
 
+    /// `S.m` naming an object's method (classes': no function): whose, and
+    /// which.
+    fn object_method(&self, e: &Expr) -> Option<(String, String)> {
+        let Expr::Member(o, m) = e else { return None };
+        let info = self.struct_named(o)?;
+        let (owner, x) = self.types.method(&info.name, m)?;
+        (self.is_class(&owner.name) && !x.is_static).then(|| (owner.name.clone(), m.clone()))
+    }
+
     /// Arguments lowered, and their types.
     fn args(&self, args: Vec<Expr>, line: usize, errors: &mut Vec<Error>) -> (Vec<Expr>, Vec<Option<String>>) {
         args.into_iter().map(|a| self.expr(a, line, errors)).unzip()
@@ -1310,6 +1346,12 @@ impl Cx<'_> {
                 let f = self.function_name(&object).expect("checked");
                 (Expr::string(&f), Some("string".into()))
             }
+            // An object's method has no function to name (AngelScript's).
+            Expr::Member(object, name) if name == "name" && self.object_method(&object).is_some() => {
+                let (owner, m) = self.object_method(&object).expect("checked");
+                self.error(errors, line, format!("{owner}.{m}.name: in AngelScript an object's method is no function of its own, so it has no name to give (ExecuteFunc can't run it): a static method instead"));
+                (Expr::string(""), Some("string".into()))
+            }
             // `I.f`: the number of `f` among `I`'s functions.
             Expr::Member(object, name) if matches!(&*object, Expr::Var(i) if self.types.functions.contains_key(i) && self.type_of_var(i).is_none()) => {
                 let Expr::Var(i) = *object else { unreachable!() };
@@ -1494,6 +1536,10 @@ impl Cx<'_> {
         // A struct's own: static.
         if let Some(info) = self.struct_named(&object) {
             let f = match name.as_str() {
+                "create" | "allocate" if info.array && self.types.method(&info.name, &name).is_none() => {
+                    self.error(errors, line, no_allocation(&info.name, &name));
+                    return (Expr::lit("0"), None);
+                }
                 "create" if self.types.method(&info.name, "create").is_none() && !info.array && !info.interface => info.method("_allocate"),
                 "allocate" if !info.array && !info.interface => info.method("_allocate"),
                 _ => match self.types.method(&info.name, &name) {
@@ -1568,7 +1614,11 @@ impl Cx<'_> {
             // A struct alone's own, unless it has a method of the name.
             "destroy" | "deallocate" if self.types.method(&t, &name).is_none() => {
                 let info = &self.types.infos[&t];
-                if !info.interface && !info.array {
+                if info.array {
+                    self.error(errors, line, no_allocation(&t, &name));
+                    return (Expr::lit("0"), None);
+                }
+                if !info.interface {
                     return (call(info.method(&name), vec![o]), None);
                 }
             }

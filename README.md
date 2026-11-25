@@ -133,7 +133,12 @@ Shape isn't built into JASS yet").
   methods functions; `x.m.execute(...)` of an object runs a function
   taking it first (`wcb__x_S_m`) through a trigger, as any function's;
   `S[i]` of an array struct is instance `i`, and `F.name`, `S.m.name`
-  the name built (JASS's output too).
+  the name built (JASS's output too). What the manual says an array
+  struct can't have is an error each, said with why, for both outputs: a
+  member's default value, an array member, `onDestroy`, `.allocate`,
+  `.create` without one of its own, `.destroy`, `.deallocate` (a static
+  member's value is a global's: allowed). In AngelScript `S.m.name` of
+  an object's method is an error too (no function of its own to name).
 - **`lower`** (the build's stage 4): what vJASS and Zinc add, made into
   JASS, for the JASS output; for AngelScript all of it but structs and
   interfaces (`lower_for`).

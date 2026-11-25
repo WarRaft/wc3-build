@@ -588,3 +588,36 @@ endfunction
     assert!(out.contains("call ExecuteFunc(\"s__mystruct_mymethod\")"), "{out}");
     assert!(out.contains("call BJDebugMsg(\"test_xxx\")"), "{out}");
 }
+
+#[test]
+fn array_structs_as_the_manual_says() {
+    let e = build(&[(
+        "t.j",
+        r#"// @dialect vjass
+struct P extends array
+    integer a = 5
+    integer array b[4]
+    static integer count = 0
+    method onDestroy takes nothing returns nothing
+    endmethod
+endstruct
+function F takes nothing returns nothing
+    local P p = P.create()
+    local P q = P.allocate()
+    call p.destroy()
+    call q.deallocate()
+endfunction
+"#,
+    )])
+    .unwrap_err();
+    // Each, said with why; a static member's value is a global's, allowed.
+    let has = |what: &str| e.iter().filter(|m| m.contains(what)).count();
+    assert_eq!(has("member a can't have a default value"), 1, "{e:?}");
+    assert_eq!(has("member b can't be an array"), 1, "{e:?}");
+    assert_eq!(has("can't have onDestroy"), 1, "{e:?}");
+    assert_eq!(has("never allocated or destroyed"), 4, "{e:?}");
+    assert!(!e.iter().any(|m| m.contains("count")), "{e:?}");
+    assert_eq!(e.len(), 7, "{e:?}");
+    // A `create` of its own is the struct's.
+    build(&[("t.j", "// @dialect vjass\nstruct P extends array\n    integer a\n    static method create takes integer i returns thistype\n        set thistype(i).a = 1\n        return i\n    endmethod\nendstruct\nfunction F takes nothing returns nothing\n    local P p = P.create(3)\nendfunction\n")]).unwrap();
+}
