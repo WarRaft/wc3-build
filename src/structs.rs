@@ -519,28 +519,30 @@ pub fn lower(m: &mut Module, game: &[Signature], classes: bool, errors: &mut Vec
     Lowered { inits, setup }
 }
 
-/// What JassHelper's manual says an array struct (`extends array`) can't
-/// have, its instances never allocated (Array structs): a member's default
-/// value, an array member, `onDestroy`. An error each.
+/// What an array struct (`extends array`: its instances only numbers,
+/// nothing creates or destroys them) can't have, its modules taken in: a
+/// member's default value, an array member, `onDestroy`. An error each,
+/// said as the editor says it (`jass_rs::array_struct`).
 fn array_struct_rules(s: &Struct, errors: &mut Vec<Error>) {
-    let mut err = |what: String| errors.push(Error { origin: s.origin.clone(), message: format!("struct {} extends array: {what} (an array struct's instances are never allocated: JassHelper's manual, Array structs)", s.name) });
+    use jass_rs::array_struct as says;
+    let mut err = |message: String| errors.push(Error { origin: s.origin.clone(), message });
     for f in s.fields.iter().filter(|f| !f.is_static) {
         if f.init.is_some() {
-            err(format!("its member {} can't have a default value; it's zero, null or false", f.name));
+            err(says::default_value(&s.name, &f.name, None));
         }
         if f.array.is_some() {
-            err(format!("its member {} can't be an array", f.name));
+            err(says::array_member(&s.name, &f.name, None));
         }
     }
     if s.methods.iter().any(|me| !me.is_static && me.function.sig.name == "onDestroy") {
-        err("it can't have onDestroy: nothing destroys its instances".into());
+        err(says::on_destroy(&s.name, None));
     }
 }
 
 /// Why `what` (`allocate`, `create`, `destroy`, `deallocate`) isn't there
 /// for the array struct `s`.
 fn no_allocation(s: &str, what: &str) -> String {
-    format!("{s}.{what}: {s} extends array, whose instances are never allocated or destroyed: an index is an instance ({s}[i]); a `create` of its own if it needs one (JassHelper's manual, Array structs)")
+    jass_rs::array_struct::call(s, what)
 }
 
 /// The function an object's method `.execute` runs (classes'): it takes

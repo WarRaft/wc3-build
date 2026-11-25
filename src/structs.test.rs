@@ -612,10 +612,10 @@ endfunction
     .unwrap_err();
     // Each, said with why; a static member's value is a global's, allowed.
     let has = |what: &str| e.iter().filter(|m| m.contains(what)).count();
-    assert_eq!(has("member a can't have a default value"), 1, "{e:?}");
-    assert_eq!(has("member b can't be an array"), 1, "{e:?}");
-    assert_eq!(has("can't have onDestroy"), 1, "{e:?}");
-    assert_eq!(has("never allocated or destroyed"), 4, "{e:?}");
+    assert_eq!(has("member 'a' can't have a default value"), 1, "{e:?}");
+    assert_eq!(has("member 'b' can't be an array"), 1, "{e:?}");
+    assert_eq!(has("onDestroy would never run"), 1, "{e:?}");
+    assert_eq!(has("extends array, so it has no"), 4, "{e:?}");
     assert!(!e.iter().any(|m| m.contains("count")), "{e:?}");
     assert_eq!(e.len(), 7, "{e:?}");
     // A `create` of its own is the struct's.
