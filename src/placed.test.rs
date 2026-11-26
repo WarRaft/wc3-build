@@ -22,10 +22,10 @@ fn what_is_placed() {
     objects.add_ability_func("[Ahea]\nOrderon=healon\nOrderoff=healoff\n[AHhb]\nOrder=holybolt\n");
 
     let r = Rawcode::from;
-    let mut tree = Doodad { placement: doo_rs::Placement::new(r(b"LTlt"), 64.0, -32.0), flags: 0, life: 50, item_table: -1, item_sets: vec![vec![(r(b"ratc"), 60), (r(b"mcri"), 20)], vec![]], number: 7 };
+    let mut tree = Doodad { placement: doo_rs::Placement::new(r(b"LTlt"), 64.0, -32.0), flags: 0, life: 50, item_table: -1, item_sets: vec![vec![(r(b"ratc"), 60), (r(b"mcri"), 20)], vec![]], number: 7, reforged: Default::default() };
     tree.placement.angle = std::f32::consts::PI;
-    let wall = Doodad { placement: doo_rs::Placement::new(r(b"LTw0"), 0.0, 0.0), flags: 2, life: 100, item_table: -1, item_sets: vec![], number: 12 };
-    let gate = Doodad { placement: doo_rs::Placement::new(r(b"LTg1"), 0.0, 0.0), flags: 4 | 2, life: 0, item_table: -1, item_sets: vec![], number: 3 };
+    let wall = Doodad { placement: doo_rs::Placement::new(r(b"LTw0"), 0.0, 0.0), flags: 2, life: 100, item_table: -1, item_sets: vec![], number: 12, reforged: Default::default() };
+    let gate = Doodad { placement: doo_rs::Placement::new(r(b"LTg1"), 0.0, 0.0), flags: 4 | 2, life: 0, item_table: -1, item_sets: vec![], number: 3, reforged: Default::default() };
     let doodads = doo_rs::Doodads { version: 8, subversion: 11, layout: doo_rs::Layout::Classic, doodads: vec![tree, wall, gate], special_version: 0, specials: vec![] };
 
     let mut paladin = Unit::new(r(b"Hpal"), 10.0, 20.0, 0);
