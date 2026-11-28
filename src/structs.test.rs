@@ -49,7 +49,7 @@ pub(crate) fn as_the_games(out: &str) {
     assert!(problems.is_empty(), "{problems:?}\n{out}");
 }
 
-const COUNTERS: &str = r#"// @dialect vjass
+const COUNTERS: &str = r#"// vJASS
 library Counters
     module Counted
         static integer made = 0
@@ -141,14 +141,14 @@ fn structs_into_jass() {
 
 #[test]
 fn what_structs_cant_be() {
-    let src = "// @dialect vjass\ninterface I\n    method f takes nothing returns nothing\nendinterface\nstruct S extends I\n    T d\n    static delegate T e\nendstruct\nstruct T\nendstruct\nfunction F takes nothing returns nothing\n    local integer i = 0\n    call i.g()\nendfunction\n";
+    let src = "// vJASS\ninterface I\n    method f takes nothing returns nothing\nendinterface\nstruct S extends I\n    T d\n    static delegate T e\nendstruct\nstruct T\nendstruct\nfunction F takes nothing returns nothing\n    local integer i = 0\n    call i.g()\nendfunction\n";
     let found = build(&[("e.j", src)]).unwrap_err();
     assert_eq!(found, ["struct S: `delegate` e, static or an array isn't built into JASS yet", "struct S has no method f of interface I", ".g() of what isn't a struct (or whose type can't be told)"], "{found:#?}");
 }
 
 #[test]
 fn interfaces_children_and_stubs_by_type() {
-    let src = r#"// @dialect vjass
+    let src = r#"// vJASS
 library Shapes
     interface Shape
         method area takes nothing returns real
@@ -243,7 +243,7 @@ endlibrary
 
 #[test]
 fn evaluate_and_execute_through_triggers() {
-    let src = r#"// @dialect vjass
+    let src = r#"// vJASS
 library L
     function Twice takes integer x returns integer
         return x * 2
@@ -285,7 +285,7 @@ endlibrary
 
 #[test]
 fn function_interfaces_by_number() {
-    let src = r#"// @dialect vjass
+    let src = r#"// vJASS
 library F
     function interface Op takes integer x, S s returns integer
     struct S
@@ -328,7 +328,7 @@ endlibrary
 
 #[test]
 fn a_function_interface_takes_only_its_like() {
-    let src = r#"// @dialect vjass
+    let src = r#"// vJASS
 library F
     function interface Op takes integer x returns integer
     function Real takes real x returns integer
@@ -347,7 +347,7 @@ endlibrary
 
 #[test]
 fn operators_as_jasshelpers() {
-    let src = r#"// @dialect vjass
+    let src = r#"// vJASS
 library O
     struct V
         integer raw
@@ -420,7 +420,7 @@ endlibrary
 
 #[test]
 fn what_a_delegate_has() {
-    let src = r#"// @dialect vjass
+    let src = r#"// vJASS
 library D
     struct Inner
         integer hp
@@ -464,7 +464,7 @@ endlibrary
 
 #[test]
 fn hooks_run_before_what_they_hook() {
-    let src = r#"// @dialect vjass
+    let src = r#"// vJASS
 library H
     private function Log takes integer i returns nothing
         call BJDebugMsg(I2S(i))
@@ -492,11 +492,11 @@ endfunction
         assert!(out.contains(part), "{part}\nnot in:\n{out}");
     }
     // A hook taking something else: an error.
-    let bad = "// @dialect vjass\nfunction W takes real r returns nothing\nendfunction\nfunction V takes integer i returns nothing\nendfunction\nhook V W\nhook Nope W\n";
+    let bad = "// vJASS\nfunction W takes real r returns nothing\nendfunction\nfunction V takes integer i returns nothing\nendfunction\nhook V W\nhook Nope W\n";
     let e = build(&[("b.j", bad)]).unwrap_err();
     assert_eq!(e, ["hook V W: W doesn't take what V takes", "hook Nope: no native or function Nope"]);
     // A native of the game's (given as the game's): its wrapper takes and gives back what it does.
-    let m = crate::from_jass::module(&[crate::from_jass::Source { name: "n.j", text: "// @dialect vjass\nfunction Seen takes integer i returns nothing\nendfunction\nhook I2S Seen\nfunction F takes nothing returns string\n    return I2S(1)\nendfunction\n" }]).unwrap();
+    let m = crate::from_jass::module(&[crate::from_jass::Source { name: "n.j", text: "// vJASS\nfunction Seen takes integer i returns nothing\nendfunction\nhook I2S Seen\nfunction F takes nothing returns string\n    return I2S(1)\nendfunction\n" }]).unwrap();
     let game = crate::from_jass::signatures(COMMON);
     let out = crate::jass::build_with(&m, &crate::jass::Options { game, ..Default::default() }).unwrap_or_else(|e| panic!("{e:?}")).script;
     assert!(out.contains("function h__I2S takes integer i returns string\n    call Seen(i)\n    return I2S(i)\nendfunction"), "{out}");
@@ -505,7 +505,7 @@ endfunction
 
 #[test]
 fn a_library_made_of_textmacros_as_jasshelper_reads_it() {
-    let lib = r#"// @dialect vjass
+    let lib = r#"// vJASS
 library Store
 //! novjass
     Store API:
@@ -531,7 +531,7 @@ library Store
 //! runtextmacro optional STORE_REALS()
 endlibrary
 "#;
-    let user = r#"// @dialect vjass
+    let user = r#"// vJASS
 //! textmacro_once STORE takes NAME, TYPE, FUNC
     // A second declaration of a macro declared once: the first is kept.
 //! endtextmacro
@@ -564,7 +564,7 @@ endscope
 fn array_struct_indexed_and_names() {
     let out = build(&[(
         "t.j",
-        r#"// @dialect vjass
+        r#"// vJASS
 struct playerdata extends array
     integer a
 endstruct
@@ -594,7 +594,7 @@ endfunction
 fn array_structs_as_the_manual_says() {
     let e = build(&[(
         "t.j",
-        r#"// @dialect vjass
+        r#"// vJASS
 struct P extends array
     integer a = 5
     integer array b[4]
@@ -620,14 +620,14 @@ endfunction
     assert!(!e.iter().any(|m| m.contains("count")), "{e:?}");
     assert_eq!(e.len(), 7, "{e:?}");
     // A `create` of its own is the struct's.
-    build(&[("t.j", "// @dialect vjass\nstruct P extends array\n    integer a\n    static method create takes integer i returns thistype\n        set thistype(i).a = 1\n        return i\n    endmethod\nendstruct\nfunction F takes nothing returns nothing\n    local P p = P.create(3)\nendfunction\n")]).unwrap();
+    build(&[("t.j", "// vJASS\nstruct P extends array\n    integer a\n    static method create takes integer i returns thistype\n        set thistype(i).a = 1\n        return i\n    endmethod\nendstruct\nfunction F takes nothing returns nothing\n    local P p = P.create(3)\nendfunction\n")]).unwrap();
 }
 
 #[test]
 fn a_childs_allocate_is_its_parents_create() {
     let out = build(&[(
         "t.j",
-        r#"// @dialect vjass
+        r#"// vJASS
 struct A
     integer x
     static method create takes integer k returns A
@@ -670,7 +670,7 @@ endfunction
 fn the_manuals_struct_usage() {
     let out = build(&[(
         "t.j",
-        r#"// @dialect vjass
+        r#"// vJASS
 globals
     integer array myArray[500]
 endglobals
@@ -723,7 +723,7 @@ endfunction
     assert!(out.contains("function DoSomething"), "{out}");
 
     // A global's initial value can't use a struct.
-    let e = build(&[("t.j", "// @dialect vjass\nstruct pair\nendstruct\nglobals\n    pair a = 0\n    pair b = pair.create()\nendglobals\n")]).unwrap_err();
+    let e = build(&[("t.j", "// vJASS\nstruct pair\nendstruct\nglobals\n    pair a = 0\n    pair b = pair.create()\nendglobals\n")]).unwrap_err();
     assert_eq!(e.len(), 1, "{e:?}");
     assert!(e[0].contains("the global b's initial value uses a struct"), "{e:?}");
 }
@@ -732,7 +732,7 @@ endfunction
 fn the_manuals_interfaces_and_pointers() {
     let out = build(&[(
         "t.j",
-        r#"// @dialect vjass
+        r#"// vJASS
 interface withpos
     real x
     real y = 1.
@@ -804,7 +804,7 @@ endfunction
 fn more_index_space_than_an_array() {
     let out = build(&[(
         "t.j",
-        r#"// @dialect vjass
+        r#"// vJASS
 globals
     constant integer Q = 20000
     integer array myArray[Q]
@@ -844,7 +844,7 @@ endfunction
     assert!(out.contains("integer array si__A_V__2"), "{out}");
     assert!(out.contains("call wcb__as_s__aBigOne_a(19990, 12)"), "{out}");
     // A child of its own index space: an error.
-    let e = build(&[("t.j", "// @dialect vjass\nstruct Y\nendstruct\nstruct X[10000] extends Y\nendstruct\n")]).unwrap_err();
+    let e = build(&[("t.j", "// vJASS\nstruct Y\nendstruct\nstruct X[10000] extends Y\nendstruct\n")]).unwrap_err();
     assert!(e[0].contains("a struct extending another has its family's index space"), "{e:?}");
 }
 
@@ -852,7 +852,7 @@ endfunction
 fn two_dimensional_arrays() {
     let out = build(&[(
         "t.j",
-        r#"// @dialect vjass
+        r#"// vJASS
 globals
    integer array mat1 [10][20]
    constant integer W=100
@@ -896,7 +896,7 @@ endfunction
 fn dynamic_arrays() {
     let out = build(&[(
         "t.j",
-        r#"// @dialect vjass
+        r#"// vJASS
 type arsample extends integer array[8]
 type iar extends integer array[3]
 type iar_ar extends iar array[3]
@@ -972,7 +972,7 @@ endfunction
 fn casts_of_dynamic_arrays() {
     let out = build(&[(
         "t.j",
-        r#"// @dialect vjass
+        r#"// vJASS
 type anarrayofdata extends integer array [6]
 function getdata5 takes integer u returns integer
     return anarrayofdata(u)[5]
@@ -991,7 +991,7 @@ endfunction
 fn inject_main_and_config() {
     let out = build(&[(
         "t.j",
-        r#"// @dialect vjass
+        r#"// vJASS
 library L initializer Start
     private function Start takes nothing returns nothing
     endfunction
@@ -1019,17 +1019,17 @@ endfunction
     assert!(out.contains("function config takes nothing returns nothing\ncall DoNothing()\nendfunction"), "{out}");
 
     // Nowhere to initialize vJASS: an error at the inject.
-    let e = build(&[("t.j", "// @dialect vjass\nlibrary L initializer S\n    private function S takes nothing returns nothing\n    endfunction\nendlibrary\n//! inject main\n    call InitCustomTriggers()\n//! endinject\n")]).unwrap_err();
+    let e = build(&[("t.j", "// vJASS\nlibrary L initializer S\n    private function S takes nothing returns nothing\n    endfunction\nendlibrary\n//! inject main\n    call InitCustomTriggers()\n//! endinject\n")]).unwrap_err();
     assert!(e[0].contains("has no place to run"), "{e:?}");
     // dovjassinit outside an inject main; an unclosed inject.
-    let e = module(&[Source { name: "t.j", text: "// @dialect vjass\n//! dovjassinit\n//! inject main\n" }]).unwrap_err();
+    let e = module(&[Source { name: "t.j", text: "// vJASS\n//! dovjassinit\n//! inject main\n" }]).unwrap_err();
     assert!(e.iter().any(|m| m.message.contains("for an `//! inject main` only")) && e.iter().any(|m| m.message.contains("has no `//! endinject`")), "{e:?}");
 }
 
 #[test]
 fn loaddata_sets_structs_from_a_table() {
     let slk = "ID;PWXL;N;E\nB;Y3;X3;D0\nC;Y1;X1;K\"stname\"\nC;X2;K\"is\"\nC;X3;K\"just\"\nC;Y2;X1;K1\nC;X2;K3\nC;X3;K\"four\"\nC;Y3;X1;K7\nC;X2;K9\nE\n";
-    let code = r#"// @dialect vjass
+    let code = r#"// vJASS
 struct stname
     integer is
     string just
@@ -1060,7 +1060,7 @@ endfunction
 fn operators_by_the_instances_type() {
     let out = build(&[(
         "t.j",
-        r#"// @dialect vjass
+        r#"// vJASS
 interface Seq
     method operator [] takes integer i returns integer
     method operator size takes nothing returns integer defaults 0

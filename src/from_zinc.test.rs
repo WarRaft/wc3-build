@@ -139,7 +139,7 @@ library Counters requires Utils, optional TimerUtils {
 
 #[test]
 fn zinc_in_vjass_too() {
-    let m = read("c.j", "// @dialect vjass\nglobals\n    integer x = 1\nendglobals\n//! zinc\nfunction Twice(integer a) -> integer { return a * 2; }\n//! endzinc\n");
+    let m = read("c.j", "// vJASS\nglobals\n    integer x = 1\nendglobals\n//! zinc\nfunction Twice(integer a) -> integer { return a * 2; }\n//! endzinc\n");
     assert_eq!(m.globals[0].name, "x");
     assert_eq!(m.functions[0].sig.name, "Twice");
     assert_eq!(m.functions[0].origin.line, 6);

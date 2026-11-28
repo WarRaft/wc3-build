@@ -62,8 +62,8 @@ pub struct Input<'a> {
     pub import: &'a crate::preprocess::Import<'a>,
 }
 
-/// A piece of code: its name (a `.zn` one is Zinc, a `.vj` one vJASS),
-/// its text, and its dialect when its header names none.
+/// A piece of code: its name (a `.zn` one is Zinc), its text, and the
+/// dialect its settings give (its project's, its header's over them).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Code {
     pub name: String,

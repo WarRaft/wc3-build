@@ -15,7 +15,7 @@ fn errors(files: &[(&str, &str)]) -> Vec<String> {
     crate::jass::build(&m).unwrap_err().into_iter().map(|e| e.message).collect()
 }
 
-const VJASS: &str = r#"// @dialect vjass
+const VJASS: &str = r#"// vJASS
 library B initializer Init requires A
     globals
         private integer count = 0
@@ -72,7 +72,7 @@ fn libraries_and_scopes_into_jass() {
 #[test]
 fn zinc_libraries_into_jass() {
     let zinc = "library Z requires A {\n    integer n = 7;\n    public function Rest(integer a) -> integer { return a % n; }\n    function onInit() { n = Rest(10) + A_Twice(1); }\n}\n";
-    let a = "// @dialect vjass\nlibrary A\n    public function Twice takes integer x returns integer\n        return x * 2\n    endfunction\nendlibrary\n";
+    let a = "// vJASS\nlibrary A\n    public function Twice takes integer x returns integer\n        return x * 2\n    endfunction\nendlibrary\n";
     let out = built(&[("z.zn", zinc), ("a.j", a)]);
     for part in [
         "integer Z__n = 7",
@@ -89,18 +89,18 @@ fn zinc_libraries_into_jass() {
 fn what_libraries_cant_be() {
     let found = errors(&[(
         "e.j",
-        "// @dialect vjass\nlibrary L initializer Go requires Nowhere\n    function Go takes integer x returns nothing\n    endfunction\nendlibrary\nlibrary P requires Q\nendlibrary\nlibrary Q requires P\nendlibrary\n",
+        "// vJASS\nlibrary L initializer Go requires Nowhere\n    function Go takes integer x returns nothing\n    endfunction\nendlibrary\nlibrary P requires Q\nendlibrary\nlibrary Q requires P\nendlibrary\n",
     )]);
     assert_eq!(found, ["L requires Nowhere, which isn't there", "P requires itself, through the libraries it requires"], "{found:?}");
-    let found = errors(&[("i.j", "// @dialect vjass\nlibrary L initializer Go\n    function Go takes integer x returns nothing\n    endfunction\nendlibrary\n")]);
+    let found = errors(&[("i.j", "// vJASS\nlibrary L initializer Go\n    function Go takes integer x returns nothing\n    endfunction\nendlibrary\n")]);
     assert_eq!(found, ["L's initializer Go takes arguments: it can't run at initialization"]);
-    let found = errors(&[("s.j", "// @dialect vjass\nfunction F takes integer x returns nothing\n    static if x > 1 then\n    endif\nendfunction\n")]);
+    let found = errors(&[("s.j", "// vJASS\nfunction F takes integer x returns nothing\n    static if x > 1 then\n    endif\nendfunction\n")]);
     assert_eq!(found, ["a `static if` of what isn't a constant boolean"]);
 }
 
 #[test]
 fn a_triggers_init_its_code_hasnt_isnt_called() {
-    let code = "// @dialect vjass\nscope Lock initializer Start\n    private function Start takes nothing returns nothing\n    endfunction\nendscope\nfunction InitTrig_Other takes nothing returns nothing\nendfunction\n";
+    let code = "// vJASS\nscope Lock initializer Start\n    private function Start takes nothing returns nothing\n    endfunction\nendscope\nfunction InitTrig_Other takes nothing returns nothing\nendfunction\n";
     let triggers = "trigger gg_trg_Lock = null\ntrigger gg_trg_Other = null\nfunction main takes nothing returns nothing\n    call InitTrig_Lock()\n    call InitTrig_Other()\nendfunction\n";
     let out = built(&[("t.j", triggers), ("c.j", code)]);
     assert!(out.contains("call InitTrig_Other()") && !out.contains("InitTrig_Lock"), "{out}");
@@ -110,7 +110,7 @@ fn a_triggers_init_its_code_hasnt_isnt_called() {
 #[test]
 fn real_libraries_vjass_built() {
     let text = concat!(
-        "// @dialect vjass\n",
+        "// vJASS\n",
         "library Tools requires /* */ Base /* */ optional Missing\n",
         "    globals\n        private constant boolean VERBOSE = true\n    endglobals\n",
         "    static if DEBUG_MODE then\n",
@@ -153,7 +153,7 @@ fn real_libraries_vjass_built() {
 #[test]
 fn three_corridors_as_jasshelper_builds_it() {
     let text = concat!(
-        "// @dialect vjass\n",
+        "// vJASS\n",
         "native TriggerAddCondition takes trigger whichTrigger, boolexpr condition returns triggercondition\n",
         "native CreateTrigger takes nothing returns trigger\n",
         "native Condition takes code func returns conditionfunc\n",
@@ -205,7 +205,7 @@ fn three_corridors_as_jasshelper_builds_it() {
 #[test]
 fn static_ifs_of_methods_that_exist() {
     let text = concat!(
-        "// @dialect vjass\n",
+        "// vJASS\n",
         "module Init\n",
         "    static if thistype.onInit.exists then\n",
         "        static method wrapped takes nothing returns nothing\n            call BJDebugMsg(\"has\")\n        endmethod\n",

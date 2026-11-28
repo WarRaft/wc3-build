@@ -26,19 +26,22 @@ pub struct Source<'a> {
 /// ([`crate::from_zinc`]), any other JASS or vJASS (its `//! zinc` blocks
 /// Zinc); every file that doesn't parse, or has what isn't read into the
 /// IR, is an error.
+/// Each file is read in the dialect its header's settings give
+/// (`jass_rs::Dialect::detect`: vJASS without one): files without their
+/// project.
 pub fn module(files: &[Source]) -> Result<Module, Vec<Error>> {
-    module_as(files, jass_rs::Dialect::Jass)
-}
-
-/// [`module`], a file without a `// @dialect` header read as `fallback`
-/// (a `.vj` one as vJASS): the project's dialect.
-pub fn module_as(files: &[Source], fallback: jass_rs::Dialect) -> Result<Module, Vec<Error>> {
-    let given: Vec<(Source, jass_rs::Dialect)> = files.iter().map(|f| (Source { name: f.name, text: f.text }, fallback)).collect();
+    let given: Vec<(Source, jass_rs::Dialect)> = files.iter().map(|f| (Source { name: f.name, text: f.text }, jass_rs::Dialect::detect(f.text))).collect();
     module_with(&given, &|_, _| None)
 }
 
-/// The module of `files` (each with the dialect it's read in without a
-/// header), in their order, JassHelper's preprocessor run over them all
+/// [`module`], every file read as `dialect` (the game's scripts: JASS).
+pub fn module_as(files: &[Source], dialect: jass_rs::Dialect) -> Result<Module, Vec<Error>> {
+    let given: Vec<(Source, jass_rs::Dialect)> = files.iter().map(|f| (Source { name: f.name, text: f.text }, dialect)).collect();
+    module_with(&given, &|_, _| None)
+}
+
+/// The module of `files` (each with the dialect its settings give: its
+/// project's, its header's over them), in their order, JassHelper's preprocessor run over them all
 /// first ([`crate::preprocess`]: macros, `novjass`, imports found by
 /// `import`); what's said of the code is said of the lines written.
 pub fn module_with(files: &[(Source, jass_rs::Dialect)], import: &crate::preprocess::Import) -> Result<Module, Vec<Error>> {
@@ -52,11 +55,11 @@ pub fn module_with(files: &[(Source, jass_rs::Dialect)], import: &crate::preproc
         while let Some(by) = expanded[root].imported_by {
             root = by;
         }
-        let fallback = files.get(root).map_or(jass_rs::Dialect::Jass, |(_, d)| *d);
+        let dialect = files.get(root).map_or(jass_rs::Dialect::VJass, |(_, d)| *d);
         let f = Source { name: &e.name, text: &e.text };
         let mut one = Module::default();
         let mut errs = Vec::new();
-        one_file(&mut one, &f, fallback, &mut errs);
+        one_file(&mut one, &f, dialect, &mut errs);
         // Back to the lines written.
         // (Past the last, as an error at the end of a file can be: the last.)
         let line = |l: usize| if l == 0 { 0 } else { e.lines.get(l - 1).or(e.lines.last()).copied().unwrap_or(l) };
@@ -70,7 +73,7 @@ pub fn module_with(files: &[(Source, jass_rs::Dialect)], import: &crate::preproc
 }
 
 /// One file into `m`: Zinc (a `.zn`), else JASS or vJASS.
-fn one_file(m: &mut Module, f: &Source, fallback: jass_rs::Dialect, errors: &mut Vec<Error>) {
+fn one_file(m: &mut Module, f: &Source, dialect: jass_rs::Dialect, errors: &mut Vec<Error>) {
     if f.name.to_ascii_lowercase().ends_with(".zn") {
         match zinc_rs::parse(f.text) {
             Ok(p) => crate::from_zinc::add(m, f, &p, errors),
@@ -78,7 +81,6 @@ fn one_file(m: &mut Module, f: &Source, fallback: jass_rs::Dialect, errors: &mut
         }
         return;
     }
-    let dialect = jass_rs::lexer::Dialect::declared(f.text).unwrap_or(if f.name.to_ascii_lowercase().ends_with(".vj") { jass_rs::Dialect::VJass } else { fallback });
     match jass_rs::parse_with(f.text, dialect) {
         Ok(p) => add(m, f, &p, errors),
         Err(e) => errors.push(Error { origin: Origin { file: f.name.into(), line: e.line }, message: e.message }),

@@ -52,7 +52,7 @@ fn built(text: &str, string_hash: bool) -> String {
 #[test]
 fn literals_hashed_as_built() {
     let text = concat!(
-        "// @dialect vjass\n",
+        "// vJASS\n",
         "globals\n    integer K = StringHash(\"hello\")\nendglobals\n",
         "function F takes string s returns integer\n",
         "    local integer a = StringHash(\"a\") + StringHash(s)\n",

@@ -56,22 +56,22 @@ fn vjass_goes_in_as_it_is() {
 fn jasshelpers_preprocessor_run_first() {
     // A textmacro of one file run in another; what's said of the code is
     // said of the line that ran it.
-    let a = "// @dialect vjass\n//! textmacro T takes X\nfunction $X$ takes nothing returns nothing\n    call Nope$X$()\nendfunction\n//! endtextmacro\n";
-    let b = "// @dialect vjass\n\n//! runtextmacro T(\"Made\")\n";
+    let a = "// vJASS\n//! textmacro T takes X\nfunction $X$ takes nothing returns nothing\n    call Nope$X$()\nendfunction\n//! endtextmacro\n";
+    let b = "// vJASS\n\n//! runtextmacro T(\"Made\")\n";
     let m = module(&[Source { name: "a.j", text: a }, Source { name: "b.j", text: b }]).unwrap_or_else(|e| panic!("{e:?}"));
     let f = m.functions.iter().find(|f| f.sig.name == "Made").expect("made");
     assert_eq!((f.origin.file.as_str(), f.origin.line), ("b.j", 3));
     assert!(matches!(&f.body[0], Stmt::Call { call, line: 3 } if call.name == "NopeMade"), "{:?}", f.body);
     // `//! inject main`: a function of its own, line for line.
-    let m = module(&[Source { name: "t.j", text: "// @dialect vjass\n//! inject main\n//! dovjassinit\n//! endinject\n" }]).unwrap();
+    let m = module(&[Source { name: "t.j", text: "// vJASS\n//! inject main\n//! dovjassinit\n//! endinject\n" }]).unwrap();
     assert_eq!((m.functions[0].sig.name.as_str(), m.functions[0].origin.line), ("wcb__inject_main", 2));
     // A table that isn't there: an error of the preprocessor's.
-    let errors = module(&[Source { name: "t.j", text: "// @dialect vjass\n//! loaddata \"x.slk\"\n" }]).unwrap_err();
+    let errors = module(&[Source { name: "t.j", text: "// vJASS\n//! loaddata \"x.slk\"\n" }]).unwrap_err();
     assert_eq!((errors[0].origin.line, errors[0].message.as_str()), (2, "`//! loaddata`: no file \"x.slk\""));
     // Tools to run on the map: `external`, and a block with its input
     // (the `i` and a space off each `//! i` line; the rest left out).
     let text = concat!(
-        "// @dialect vjass\n\n//! external ObjectMerger w3u hfoo h000 unam \"Captain\"\n",
+        "// vJASS\n\n//! external ObjectMerger w3u hfoo h000 unam \"Captain\"\n",
         "//! externalblock extension=lua LuaMerger $FILENAME$ -v\n",
         "//! i print(1)\n    // not sent\n//! i\n//!   i   two\n//! endexternalblock\n",
         "function F takes nothing returns nothing\nendfunction\n",
@@ -84,8 +84,8 @@ fn jasshelpers_preprocessor_run_first() {
     ]);
     // The code after the block is read, at its lines.
     assert_eq!(m.functions[0].origin.line, 10);
-    let errors = module(&[Source { name: "t.j", text: "// @dialect vjass\n//! externalblock X\n//! i a\n" }]).unwrap_err();
+    let errors = module(&[Source { name: "t.j", text: "// vJASS\n//! externalblock X\n//! i a\n" }]).unwrap_err();
     assert_eq!((errors[0].origin.line, errors[0].message.as_str()), (2, "`//! externalblock` has no `//! endexternalblock`"));
-    let errors = module(&[Source { name: "t.j", text: "// @dialect vjass\n//! external\n" }]).unwrap_err();
+    let errors = module(&[Source { name: "t.j", text: "// vJASS\n//! external\n" }]).unwrap_err();
     assert_eq!(errors[0].message, "`//! external` needs a tool's name");
 }
