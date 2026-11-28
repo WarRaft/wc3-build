@@ -16,6 +16,7 @@ pub mod inline;
 pub mod string_hash;
 pub mod placed;
 pub mod preprocess;
+pub mod cjass;
 pub mod structs;
 pub mod tables;
 pub mod uglify;
