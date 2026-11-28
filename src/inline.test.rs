@@ -62,10 +62,11 @@ function main takes nothing returns nothing
 endfunction
 "#,
     );
-    // Read twice, out of order, after a call, its own parameter set, a
-    // global a local hides (SetG's g, Hidden's): not inlined; Say is.
-    assert!(out.contains("call SetG(Twice(1) + Swapped(1, 2) + CallFirst(3))"), "{out}");
-    assert!(out.contains("call SetParam(4)\ncall BJDebugMsg(\"hi\")\ncall BJDebugMsg(I2S(Hidden()))"), "{out}");
+    // Read twice, out of order, after a call, its own parameter set: not
+    // inlined; Say is. The local hiding the global g is renamed (g__l), so
+    // SetG's and Hidden's g inline as the global's.
+    assert!(out.contains("local integer g__l = 2\nset g = Twice(1) + Swapped(1, 2) + CallFirst(3)"), "{out}");
+    assert!(out.contains("call SetParam(4)\ncall BJDebugMsg(\"hi\")\ncall BJDebugMsg(I2S(g))"), "{out}");
     // Dead: what nothing calls (but by ExecuteFunc's name), a global nothing reads.
     assert!(!out.contains("function Nobody") && out.contains("function Named") && !out.contains("unused") && !out.contains("function Say"), "{out}");
 }

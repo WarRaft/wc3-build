@@ -28,7 +28,8 @@ fn built(files: &[(&str, &str)]) -> String {
         .collect();
     assert!(pure.is_empty(), "{pure:?}\n{out}");
     let common = jass_rs::names::Declarations::of(&jass_rs::parse(COMMON).unwrap());
-    let problems = jass_rs::names::check(&program, &[&common]);
+    // Errors, and what a build must take care of (a name hidden).
+    let problems: Vec<_> = jass_rs::names::check(&program, &[&common]).into_iter().filter(|d| d.level == jass_rs::Level::Error || d.rule == parser_rs::rule::SHADOWED_GLOBAL || d.rule == parser_rs::rule::SHADOWED_NAME).collect();
     assert!(problems.is_empty(), "{problems:?}\n{out}");
     // Calls go only up.
     let mut seen: HashSet<String> = common.functions.keys().cloned().collect();
@@ -188,4 +189,29 @@ fn globals_after_what_they_read_and_calls_into_main() {
     assert!(e[0].message.contains("the constant 'S' is set by calling 'N'"), "{e:?}");
     let e = build(&module(&[Source { name: "c.j", text: "integer a = b\ninteger b = a\n" }]).unwrap()).unwrap_err();
     assert!(e[0].message.contains("reads itself"), "{e:?}");
+}
+
+/// Extended JASS hides any name; the game, only a global variable's. A
+/// build renames every parameter and local named as a global, a function,
+/// a type or `alias` (`x__l`), so the output reads as strict JASS and a
+/// local never takes a global's place.
+#[test]
+fn hidden_names_renamed() {
+    let out = built(&[(
+        "a.j",
+        "\
+globals
+    integer g = 1
+endglobals
+function Helper takes nothing returns integer
+    return g
+endfunction
+function F takes integer g, unit unit returns integer
+    local integer Helper = g
+    local integer alias = Helper + 1
+    return alias + Helper()
+endfunction
+",
+    )]);
+    assert!(out.contains("function F takes integer g__l, unit unit__l returns integer\n    local integer Helper__l = g__l\n    local integer alias__l = Helper__l + 1\n    return alias__l + Helper()\n"), "{out}");
 }

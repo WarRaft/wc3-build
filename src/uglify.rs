@@ -244,8 +244,15 @@ pub fn uglify(m: &mut Module) -> Renamed {
     apply_top(m, &renamed.names);
     // Each function's locals and parameters: the shortest names clear of
     // everything else the function names.
+    // What a local can't be named for the game: a function, a native, a
+    // type (a primitive), or, for a build that moves code, a global.
+    let mut module_names: HashSet<String> = ["integer", "real", "boolean", "string", "code", "handle", "nothing", "alias"].iter().map(|s| s.to_string()).collect();
+    module_names.extend(m.functions.iter().map(|f| f.sig.name.clone()));
+    module_names.extend(m.natives.iter().map(|n| n.sig.name.clone()));
+    module_names.extend(m.globals.iter().map(|g| g.name.clone()));
+    module_names.extend(m.types.iter().map(|t| t.name.clone()));
     for f in &mut m.functions {
-        rename_locals(f);
+        rename_locals(f, &module_names);
     }
     renamed
 }
@@ -421,8 +428,9 @@ fn rename_expr(e: &mut Expr, to: &HashMap<String, String>, own: Option<&HashSet<
 }
 
 /// `f`'s parameters and locals renamed to the shortest names clear of the
-/// words and of every other name `f` uses, the most used first.
-fn rename_locals(f: &mut Function) {
+/// words, of every other name `f` uses and of `module` (the functions,
+/// natives, types and globals a local mustn't hide), the most used first.
+fn rename_locals(f: &mut Function, module: &HashSet<String>) {
     let mut own = Vec::new();
     locals_and_params(f, &mut own);
     if own.is_empty() {
@@ -440,6 +448,7 @@ fn rename_locals(f: &mut Function) {
     }
     let mut taken: HashSet<String> = WORDS.iter().map(|s| s.to_string()).collect();
     taken.extend(used.iter().filter(|n| !own_set.contains(*n)).cloned());
+    taken.extend(module.iter().filter(|n| !own_set.contains(*n)).cloned());
     let mut order: Vec<String> = own.clone();
     order.sort_by_key(|n| std::cmp::Reverse(count.get(n.as_str()).copied().unwrap_or(0)));
     order.dedup();

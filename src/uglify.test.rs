@@ -49,16 +49,17 @@ endfunction
     ] {
         assert!(out.contains(part), "{part}\n---\n{out}");
     }
-    // A function's locals: the shortest names clear of what it uses (the
-    // global `a`, its own name `b`), the most used first.
+    // A function's locals: the shortest names clear of what it uses and of
+    // every function, type and global (a local hides none: `a`, `b`, `c`,
+    // `d`, `e` are taken), the most used first.
     assert_eq!(r.names["Helper"], "b");
-    assert!(out.contains("function b takes integer d returns integer\n    local integer c = d + a\n    return c\n"), "{out}");
+    assert!(out.contains("function b takes integer g returns integer\n    local integer f = g + a\n    return f\n"), "{out}");
     // Put back, it's what it was (its locals aside).
     let mut again = module(&[Source { name: "a.j", text: src }]).unwrap();
     let mut back = m.clone();
     put_back(&mut back, &r.names);
     for f in again.functions.iter_mut().chain(back.functions.iter_mut()) {
-        rename_locals(f);
+        rename_locals(f, &HashSet::new());
     }
     assert_eq!(back, again);
 }

@@ -442,6 +442,7 @@ fn bin_op(op: j::BinOp) -> BinOp {
         j::BinOp::Sub => BinOp::Sub,
         j::BinOp::Mul => BinOp::Mul,
         j::BinOp::Div => BinOp::Div,
+        j::BinOp::Mod => BinOp::Mod,
         j::BinOp::Eq => BinOp::Eq,
         j::BinOp::NotEq => BinOp::NotEq,
         j::BinOp::Gt => BinOp::Gt,

@@ -44,7 +44,8 @@ pub(crate) fn as_the_games(out: &str) {
         .collect();
     assert!(pure.is_empty(), "{pure:?}\n{out}");
     let common = jass_rs::names::Declarations::of(&jass_rs::parse(COMMON).unwrap());
-    let problems = jass_rs::names::check(&program, &[&common]);
+    // Errors, and what a build must take care of (a name hidden).
+    let problems: Vec<_> = jass_rs::names::check(&program, &[&common]).into_iter().filter(|d| d.level == jass_rs::Level::Error || d.rule == parser_rs::rule::SHADOWED_GLOBAL || d.rule == parser_rs::rule::SHADOWED_NAME).collect();
     assert!(problems.is_empty(), "{problems:?}\n{out}");
 }
 

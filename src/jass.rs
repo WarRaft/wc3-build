@@ -131,6 +131,10 @@ pub fn build_with(m: &Module, options: &Options) -> Result<Built, Vec<Error>> {
     }
     let mut errors = Vec::new();
     merge_entries(&mut m);
+    // The game's JASS: a name hidden only where the game allows it.
+    if options.script == Script::Jass {
+        unshadow(&mut m, &options.game);
+    }
     let deferred = order_globals(&mut m, &mut errors);
     if !errors.is_empty() {
         return Err(errors);
@@ -385,6 +389,74 @@ fn merge_entries(m: &mut Module) {
             i += 1;
             !rest.contains(&(i - 1))
         });
+    }
+}
+
+/// The game's names a variable can't take (the primitive types) or
+/// mustn't, for the game's sake (`alias`).
+const KEPT_NAMES: &[&str] = &["integer", "real", "boolean", "string", "code", "handle", "nothing", "alias"];
+
+/// Every parameter and local named as a global variable, a function, a
+/// native or a type (`m`'s, the game's `game` functions) renamed
+/// (`x__l`): extended JASS lets a name be hidden anywhere, the game only a
+/// global variable's, and a build that moves code (inlining) mustn't have
+/// a local take a global's place.
+fn unshadow(m: &mut Module, game: &[Signature]) {
+    let mut taken: HashSet<String> = KEPT_NAMES.iter().map(|s| s.to_string()).collect();
+    taken.extend(m.globals.iter().map(|g| g.name.clone()));
+    taken.extend(m.functions.iter().map(|f| f.sig.name.clone()));
+    taken.extend(m.natives.iter().map(|n| n.sig.name.clone()));
+    taken.extend(m.types.iter().map(|t| t.name.clone()));
+    taken.extend(game.iter().map(|s| s.name.clone()));
+    // The game's types the code names (`unit` of `unit u`).
+    taken.extend(m.globals.iter().map(|g| g.ty.clone()));
+    for f in &m.functions {
+        taken.extend(f.sig.params.iter().map(|p| p.ty.clone()));
+        taken.extend(f.sig.returns.clone());
+        locals_typed(&f.body, &mut |t| {
+            taken.insert(t.to_string());
+        });
+    }
+    for f in &mut m.functions {
+        let mut own: HashSet<String> = f.sig.params.iter().map(|p| p.name.clone()).collect();
+        locals_of(&f.body, &mut |n| {
+            own.insert(n.to_string());
+        });
+        let mut renames: HashMap<String, String> = HashMap::new();
+        for n in own.iter().filter(|n| taken.contains(*n)) {
+            let mut new = format!("{n}__l");
+            while taken.contains(&new) || own.contains(&new) {
+                new.push('_');
+            }
+            renames.insert(n.clone(), new);
+        }
+        if renames.is_empty() {
+            continue;
+        }
+        for p in &mut f.sig.params {
+            if let Some(t) = renames.get(&p.name) {
+                p.name = t.clone();
+            }
+        }
+        rename(&mut f.body, &renames);
+    }
+}
+
+/// Calls `f` with the type of every local declared in `body`.
+fn locals_typed(body: &[Stmt], f: &mut impl FnMut(&str)) {
+    for s in body {
+        match s {
+            Stmt::Local { ty, .. } => f(ty),
+            Stmt::If { branches, otherwise, .. } => {
+                branches.iter().for_each(|(_, b)| locals_typed(b, f));
+                if let Some(b) = otherwise {
+                    locals_typed(b, f);
+                }
+            }
+            Stmt::Loop { body, .. } => locals_typed(body, f),
+            Stmt::Debug { stmt, .. } => locals_typed(std::slice::from_ref(stmt), f),
+            _ => {}
+        }
     }
 }
 

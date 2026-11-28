@@ -336,6 +336,13 @@ Shape isn't built into JASS yet").
   of drops is written as itself whatever its level (Diablo III beta's of
   11 and 13); CruiserCommand's `war3map.j` writes one of level 50 as none
   (`-1`), which nothing in its files explains.
+- **Hidden names** (`jass::unshadow`, JASS only): extended JASS lets a
+  parameter or a local take any name; the game, only a global
+  variable's, and inlining mustn't have a local take a global's place.
+  Every parameter and local named as a global, a function, a native, a
+  type (one the code names, the primitives) or `alias` is renamed
+  (`x__l`), so the output reads as strict JASS (`shadowed-name`) and a
+  function inlines where its global would have been hidden.
 - **`uglify`**: shorter names, on the finished tree (`jass::Options`'s
   `uglify`, `jass::build_with`): every name the module declares that the
   game doesn't need as it is (its functions but `main` and `config`,
@@ -344,7 +351,8 @@ Shape isn't built into JASS yet").
   the shortest. Natives and whatever the module uses without declaring
   (the game's names) are kept and never given, nor are JASS's words. A
   function's locals and parameters take the shortest names again in each
-  function, clear of what it uses (they're given names nothing else can
+  function, clear of what it uses and of every function, type and global
+  (a local hides none: see below) (they're given names nothing else can
   have first, so a top-level name given later is never taken for one). A
   literal naming a function in `ExecuteFunc("F")` or a global in
   `TriggerRegisterVariableEvent(t, "udg_x", ...)` is renamed with it;
