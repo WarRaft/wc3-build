@@ -337,12 +337,15 @@ impl Reader<'_> {
                 init: initializer.as_ref().map(|e| self.expr(e)),
                 line: *line,
             },
-            j::Stmt::Set { name, index, value, line, .. } => Stmt::Set {
-                name: name.clone(),
-                index: index.as_ref().map(|e| self.expr(e)),
-                value: self.expr(value),
-                line: *line,
-            },
+            j::Stmt::Set { name, index, op, value, line, .. } => {
+                let index = index.as_ref().map(|e| self.expr(e));
+                let target = match &index {
+                    Some(i) => Expr::Index(name.clone(), Box::new(i.clone())),
+                    None => Expr::Var(name.clone()),
+                };
+                let value = compound(target, *op, self.expr(value));
+                Stmt::Set { name: name.clone(), index, value, line: *line }
+            }
             j::Stmt::Call { name, args, line, .. } => {
                 Stmt::Call { call: Call { name: name.clone(), args: args.iter().map(|a| self.expr(a)).collect() }, line: *line }
             }
@@ -358,15 +361,24 @@ impl Reader<'_> {
             // `a[i][j] = v`: an element of `a[i]`.
             // An element of what isn't a member: an array's element's, a
             // cast's (`Table(this)[i]`: its `[]=`).
-            j::Stmt::SetMember { target, index: Some(j), value, line, .. } if !matches!(target.kind, j::ExprKind::Member(..)) => {
-                Stmt::SetElement { target: self.expr(target), index: self.expr(j), value: self.expr(value), line: *line }
+            j::Stmt::SetMember { target, index: Some(j), op, value, line, .. } if !matches!(target.kind, j::ExprKind::Member(..)) => {
+                let (target, index) = (self.expr(target), self.expr(j));
+                let value = compound(Expr::Element(Box::new(target.clone()), Box::new(index.clone())), *op, self.expr(value));
+                Stmt::SetElement { target, index, value, line: *line }
             }
-            j::Stmt::SetMember { target, index, value, line, .. } => {
+            j::Stmt::SetMember { target, index, op, value, line, .. } => {
                 let (object, name) = match &target.kind {
                     j::ExprKind::Member(o, n) => (self.expr(o), n.clone()),
                     _ => unreachable!("the parser sets a member or an element only"),
                 };
-                Stmt::SetMember { object, name, index: index.as_ref().map(|e| self.expr(e)), value: self.expr(value), line: *line }
+                let index = index.as_ref().map(|e| self.expr(e));
+                let member = Expr::Member(Box::new(object.clone()), name.clone());
+                let read = match &index {
+                    Some(i) => Expr::Element(Box::new(member), Box::new(i.clone())),
+                    None => member,
+                };
+                let value = compound(read, *op, self.expr(value));
+                Stmt::SetMember { object, name, index, value, line: *line }
             }
             j::Stmt::CallMethod { call, line, .. } => match self.expr(call) {
                 Expr::Method(call) => Stmt::CallMethod { call: *call, line: *line },
@@ -416,23 +428,38 @@ impl Reader<'_> {
             K::Index(o, i) => Expr::Element(Box::new(self.expr(o)), Box::new(self.expr(i))),
             K::Binary(a, op, b) => Expr::Binary(
                 Box::new(self.expr(a)),
-                match op {
-                    j::BinOp::Add => BinOp::Add,
-                    j::BinOp::Sub => BinOp::Sub,
-                    j::BinOp::Mul => BinOp::Mul,
-                    j::BinOp::Div => BinOp::Div,
-                    j::BinOp::Eq => BinOp::Eq,
-                    j::BinOp::NotEq => BinOp::NotEq,
-                    j::BinOp::Gt => BinOp::Gt,
-                    j::BinOp::Lt => BinOp::Lt,
-                    j::BinOp::GtEq => BinOp::GtEq,
-                    j::BinOp::LtEq => BinOp::LtEq,
-                    j::BinOp::And => BinOp::And,
-                    j::BinOp::Or => BinOp::Or,
-                },
+                bin_op(*op),
                 Box::new(self.expr(b)),
             ),
         }
+    }
+}
+
+/// JASS's binary operator as the IR's.
+fn bin_op(op: j::BinOp) -> BinOp {
+    match op {
+        j::BinOp::Add => BinOp::Add,
+        j::BinOp::Sub => BinOp::Sub,
+        j::BinOp::Mul => BinOp::Mul,
+        j::BinOp::Div => BinOp::Div,
+        j::BinOp::Eq => BinOp::Eq,
+        j::BinOp::NotEq => BinOp::NotEq,
+        j::BinOp::Gt => BinOp::Gt,
+        j::BinOp::Lt => BinOp::Lt,
+        j::BinOp::GtEq => BinOp::GtEq,
+        j::BinOp::LtEq => BinOp::LtEq,
+        j::BinOp::And => BinOp::And,
+        j::BinOp::Or => BinOp::Or,
+    }
+}
+
+/// Extended JASS's `+=`, `-=` (`op`): what's set is `target op value`
+/// (`set x = x + (v)`, a target's index read twice, as Zinc's); `=`: the
+/// value.
+fn compound(target: Expr, op: Option<j::BinOp>, value: Expr) -> Expr {
+    match op {
+        Some(op) => Expr::binary(target, bin_op(op), value),
+        None => value,
     }
 }
 

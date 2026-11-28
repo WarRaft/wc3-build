@@ -24,7 +24,7 @@ fn built(files: &[(&str, &str)]) -> String {
     let program = jass_rs::parse(&out).unwrap_or_else(|e| panic!("line {}: {}\n{out}", e.line, e.message));
     let pure: Vec<_> = jass_rs::lint(&program)
         .into_iter()
-        .filter(|d| parser_rs::find_rule(d.rule).is_some_and(|r| r.groups.contains(&parser_rs::group::PURE)) || d.rule == parser_rs::rule::DUPLICATE_DECLARATION)
+        .filter(|d| parser_rs::find_rule(d.rule).is_some_and(|r| r.groups.contains(&parser_rs::group::STRICT)) || d.rule == parser_rs::rule::DUPLICATE_DECLARATION)
         .collect();
     assert!(pure.is_empty(), "{pure:?}\n{out}");
     let common = jass_rs::names::Declarations::of(&jass_rs::parse(COMMON).unwrap());
@@ -83,6 +83,28 @@ function F takes nothing returns integer
 endfunction
 "
     );
+}
+
+#[test]
+fn extended_jass_as_the_games() {
+    // `!`, `&&`, `||`, `+=`, `-=` are written as `not`, `and`, `or`,
+    // `set x = x + (v)`: the output reads as strict JASS (`built`).
+    let out = built(&[(
+        "a.j",
+        "\
+function F takes boolean a, boolean b, integer n returns boolean
+    local integer array xs
+    local integer i = 0
+    set i += 1
+    set i -= n - 2
+    set xs[i] += 2 * n
+    i += 3
+    return !a && b || !(i == 1)
+endfunction
+",
+    )]);
+    assert!(out.contains("    set i = i + 1\n    set i = i - (n - 2)\n    set xs[i] = xs[i] + 2 * n\n    set i = i + 3\n"), "{out}");
+    assert!(out.contains("    return not a and b or not (i == 1)\n"), "{out}");
 }
 
 #[test]

@@ -372,7 +372,7 @@ fn the_whole_main_as_world_editors() {
             out.extend(
                 jass_rs::lint(&program)
                     .into_iter()
-                    .filter(|d| parser_rs::find_rule(d.rule).is_some_and(|r| r.groups.contains(&parser_rs::group::PURE)) || d.rule == parser_rs::rule::DUPLICATE_DECLARATION)
+                    .filter(|d| parser_rs::find_rule(d.rule).is_some_and(|r| r.groups.contains(&parser_rs::group::STRICT)) || d.rule == parser_rs::rule::DUPLICATE_DECLARATION)
                     .map(|d| format!("{}: {}", d.rule, d.message)),
             );
             out

@@ -40,7 +40,7 @@ pub(crate) fn as_the_games(out: &str) {
     let program = jass_rs::parse(out).unwrap_or_else(|e| panic!("line {}: {}\n{out}", e.line, e.message));
     let pure: Vec<_> = jass_rs::lint(&program)
         .into_iter()
-        .filter(|d| parser_rs::find_rule(d.rule).is_some_and(|r| r.groups.contains(&parser_rs::group::PURE)) || d.rule == parser_rs::rule::DUPLICATE_DECLARATION)
+        .filter(|d| parser_rs::find_rule(d.rule).is_some_and(|r| r.groups.contains(&parser_rs::group::STRICT)) || d.rule == parser_rs::rule::DUPLICATE_DECLARATION)
         .collect();
     assert!(pure.is_empty(), "{pure:?}\n{out}");
     let common = jass_rs::names::Declarations::of(&jass_rs::parse(COMMON).unwrap());

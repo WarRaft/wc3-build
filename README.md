@@ -390,12 +390,12 @@ Shape isn't built into JASS yet").
 ## Tests
 
 `cargo test`: each output is read back by `jass-rs` and must break no
-rule of the group `pure`, have no duplicate, and check clean for names and
+rule of the group `strict`, have no duplicate, and check clean for names and
 types; calls only go up.
 
 `tests/real.rs`'s `built_scripts_check_clean` (ignored) reads scripts a
 build wrote (`BUILT_FILES`) as the game does, over `JASS_GAME`: no
-problem of names, types or `pure`'s. Diablo III beta's whole map built
+problem of names, types or `strict`'s. Diablo III beta's whole map built
 with `inline=1` and `dead_code=1` (6 calls inlined, 53 functions and 66
 globals left out)
 and with `uglify=1` too: 0 problems (2026-11-25).
