@@ -601,7 +601,7 @@ impl Run<'_> {
     #[allow(clippy::too_many_arguments)]
     fn put(&mut self, out: &mut Vec<Line>, m: &Macro, name: &str, given: &[Line], line: &Line, at: usize, parent: Option<usize>, disabled: &mut Vec<String>, depth: usize) {
         let used = line.origin(at).map_or_else(|| Spelling::new("", 0, at), |(s, _)| s);
-        let me = self.made.map.expansion(Expansion { name: name.to_string(), defined: m.defined.clone(), used, parent });
+        let me = self.made.map.expansion(Expansion { name: format!("macro {name}"), defined: m.defined.clone(), used, parent });
         let params = m.params.clone().unwrap_or_default();
         // `` `a` ``: the argument as a string.
         let quoted: Vec<Line> = given.iter().map(|g| {
@@ -785,6 +785,23 @@ fn substitute_words(line: &Line, params: &[String], by: &[Line]) -> Line {
         out.pieces.push((1, 0, s.clone(), *e));
     }
     out
+}
+
+/// `DATE` and `TIME` now (UTC): `yyyy.mm.dd`, `hh:mm:ss`.
+pub fn now() -> (String, String) {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
+    let (days, rest) = (secs.div_euclid(86400), secs.rem_euclid(86400));
+    // The civil date of a day count (Howard Hinnant's algorithm).
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (format!("{y:04}.{m:02}.{d:02}"), format!("{:02}:{:02}:{:02}", rest / 3600, rest % 3600 / 60, rest % 60))
 }
 
 fn file_name(path: &str) -> String {

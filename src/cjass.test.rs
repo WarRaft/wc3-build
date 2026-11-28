@@ -100,7 +100,7 @@ fn each_piece_knows_where_it_s_written() {
     assert_eq!(m.origin(2, 1).map(|(s, _)| (s.line, s.col)), Some((1, 20)));
     assert_eq!(m.origin(2, 12).map(|(s, _)| (s.line, s.col)), Some((3, 5)));
     let (_, e) = m.origin(2, 1).unwrap();
-    assert_eq!(m.chain(e).iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["msg"]);
+    assert_eq!(m.chain(e).iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["macro msg"]);
 }
 
 #[test]
