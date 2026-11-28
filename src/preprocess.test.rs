@@ -61,3 +61,23 @@ fn imports_once_each_as_files_of_their_own() {
     let e = expand(&[("a.j", "//! import \"nope\"\n")], &import).unwrap_err();
     assert_eq!(e[0].message, "`//! import`: no file \"nope\"");
 }
+
+#[test]
+fn every_piece_knows_where_it_s_written() {
+    let a = "//! textmacro Init takes NAME\nfunction $NAME$_init takes nothing returns nothing\nendfunction\n//! endtextmacro\n";
+    let b = "\n//! runtextmacro Init(\"Hero\")\n";
+    let out = expand(&[("a.j", a), ("b.j", b)], &|_, _| None).unwrap();
+    let m = &out[1].map;
+    assert_eq!(m.text, "\nfunction Hero_init takes nothing returns nothing\nendfunction\n");
+    // `function ` is the macro's body (a.j:2), `Hero` the argument where
+    // it's given (b.j:2, its column), `_init` the body again.
+    assert_eq!(m.origin(2, 1).map(|(s, _)| (s.file, s.line, s.col)), Some(("a.j".into(), 2, 1)));
+    assert_eq!(m.origin(2, 10).map(|(s, _)| (s.file, s.line, s.col)), Some(("b.j".into(), 2, 24)));
+    assert_eq!(m.origin(2, 14).map(|(s, _)| (s.file, s.line, s.col)), Some(("a.j".into(), 2, 16)));
+    // The expansion: Init, defined at a.j:1, used at b.j:2.
+    let (_, e) = m.origin(2, 1).unwrap();
+    let chain = m.chain(e);
+    assert_eq!(chain.iter().map(|e| (e.name.as_str(), e.defined.line, e.used.file.as_str(), e.used.line)).collect::<Vec<_>>(), [("Init", 1, "b.j", 2)]);
+    // And each line is said where the macro is used, as before.
+    assert_eq!(out[1].lines, [1, 2, 2]);
+}

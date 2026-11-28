@@ -26,6 +26,8 @@
 
 use std::collections::HashMap;
 
+use parser_rs::expand::{Expansion, Line, Mapped, Spelling};
+
 use crate::ir::{Error, External, Origin};
 
 /// Where `//! import "path"` in the file `from` leads: the file's name
@@ -38,8 +40,12 @@ pub type Import<'a> = dyn Fn(&str, &str) -> Option<(String, String)> + 'a;
 pub struct Expanded {
     pub name: String,
     pub text: String,
-    /// Each line's line in the file as written (from 1).
+    /// Each line's line in the file as written (from 1): a macro's, the
+    /// line of the outermost `runtextmacro` that put it there.
     pub lines: Vec<usize>,
+    /// Where each piece of `text` is written and the expansions that made
+    /// it (`parser_rs::expand`).
+    pub map: Mapped,
     /// The index of the file it was imported by (`None`: given, not
     /// imported), for its dialect.
     pub imported_by: Option<usize>,
@@ -64,8 +70,8 @@ fn external_head(head: &str) -> Option<(Option<String>, String, String)> {
 /// A macro.
 struct Macro {
     params: Vec<String>,
-    /// Its lines, without their line breaks.
-    body: Vec<String>,
+    /// Its lines, without their line breaks, each where it's written.
+    body: Vec<Line>,
     once: bool,
     origin: Origin,
 }
@@ -80,14 +86,15 @@ fn directive(line: &str) -> Option<&str> {
 }
 
 /// The quoted strings of an argument list `"a", "b"`, as written between
-/// their quotes (JassHelper takes them as they are).
-fn strings(text: &str) -> Result<Vec<String>, String> {
+/// their quotes (JassHelper takes them as they are), each with the byte it
+/// starts at in `text`.
+fn strings(text: &str) -> Result<Vec<(String, usize)>, String> {
     let mut out = Vec::new();
     let mut rest = text.trim();
     while !rest.is_empty() {
         let Some(r) = rest.strip_prefix('"') else { return Err(format!("expected a quoted argument at `{rest}`")) };
         let Some(end) = r.find('"') else { return Err("an argument's quote isn't closed".into()) };
-        out.push(r[..end].to_string());
+        out.push((r[..end].to_string(), text.len() - r.len()));
         rest = r[end + 1..].trim_start();
         if let Some(r) = rest.strip_prefix(',') {
             rest = r.trim_start();
@@ -151,17 +158,20 @@ pub fn expand(files: &[(&str, &str)], import: &Import) -> Result<Vec<Expanded>, 
     // The macros, and each file without them (and without novjass).
     let mut macros: HashMap<String, Macro> = HashMap::new();
     let mut loaded = 0;
-    let mut kept: Vec<Vec<(String, usize)>> = Vec::new();
+    let mut kept: Vec<Vec<Line>> = Vec::new();
     let mut externals: Vec<Vec<External>> = Vec::new();
     for (name, text, _) in &all {
         let mut own = Vec::new();
         let mut tools = Vec::new();
         // An `//! inject` open: what it replaces, and its line.
         let mut injecting: Option<(String, usize)> = None;
+        // A line of the file as written, or one made at the directive of
+        // line `at` (said to be written there).
+        let written = |text: &str, at: usize| Line::written(text, Spelling::new(name, at, 1), None);
         let mut lines = parser_rs::lines::lines(&text).enumerate();
         while let Some((i, line)) = lines.next() {
             let Some(d) = directive(line) else {
-                own.push((line.to_string(), i + 1));
+                own.push(written(line, i + 1));
                 continue;
             };
             let word = d.split_whitespace().next().unwrap_or("");
@@ -183,12 +193,12 @@ pub fn expand(files: &[(&str, &str)], import: &Import) -> Result<Vec<Expanded>, 
                     };
                     let mut body = Vec::new();
                     let mut closed = false;
-                    for (_, l) in lines.by_ref() {
+                    for (j, l) in lines.by_ref() {
                         if directive(l).is_some_and(|d| d == "endtextmacro") {
                             closed = true;
                             break;
                         }
-                        body.push(l.to_string());
+                        body.push(written(l, j + 1));
                     }
                     if !closed {
                         errors.push(error(name, i + 1, format!("`//! textmacro {mname}` has no `//! endtextmacro`")));
@@ -230,16 +240,16 @@ pub fn expand(files: &[(&str, &str)], import: &Import) -> Result<Vec<Expanded>, 
                     } else if let Some((_, at)) = &injecting {
                         errors.push(error(name, i + 1, format!("`//! inject` in the `//! inject` of line {at}")));
                     } else {
-                        own.push((format!("function {INJECT}{what} takes nothing returns nothing"), i + 1));
+                        own.push(written(&format!("function {INJECT}{what} takes nothing returns nothing"), i + 1));
                         injecting = Some((what.to_string(), i + 1));
                     }
                 }
                 "endinject" => match injecting.take() {
-                    Some(_) => own.push(("endfunction".to_string(), i + 1)),
+                    Some(_) => own.push(written("endfunction", i + 1)),
                     None => errors.push(error(name, i + 1, "`//! endinject` without its `//! inject`".into())),
                 },
                 "dovjassinit" => match &injecting {
-                    Some((what, _)) if what == "main" => own.push((format!("call {DOVJASSINIT}()"), i + 1)),
+                    Some((what, _)) if what == "main" => own.push(written(&format!("call {DOVJASSINIT}()"), i + 1)),
                     _ => errors.push(error(name, i + 1, "`//! dovjassinit` is for an `//! inject main` only".into())),
                 },
                 // `//! loaddata "path.slk"`: the table made a function setting
@@ -258,7 +268,7 @@ pub fn expand(files: &[(&str, &str)], import: &Import) -> Result<Vec<Expanded>, 
                     match load_data(&slk, loaded) {
                         Ok(lines) => {
                             loaded += 1;
-                            own.extend(lines.into_iter().map(|l| (l, i + 1)));
+                            own.extend(lines.into_iter().map(|l| written(&l, i + 1)));
                         }
                         Err(e) => errors.push(error(name, i + 1, format!("`//! loaddata \"{path}\"`: {e}"))),
                     }
@@ -300,7 +310,7 @@ pub fn expand(files: &[(&str, &str)], import: &Import) -> Result<Vec<Expanded>, 
                 "endexternalblock" => errors.push(error(name, i + 1, "`//! endexternalblock` without its `//! externalblock`".into())),
                 // Read already.
                 "import" => {}
-                _ => own.push((line.to_string(), i + 1)),
+                _ => own.push(written(line, i + 1)),
             }
         }
         if let Some((what, at)) = injecting {
@@ -313,12 +323,13 @@ pub fn expand(files: &[(&str, &str)], import: &Import) -> Result<Vec<Expanded>, 
     // The macros run, in every file.
     let mut out = Vec::new();
     for (((name, _, by), own), externals) in all.iter().zip(kept).zip(externals) {
-        let mut text = String::new();
-        let mut lines = Vec::new();
-        for (line, at) in own {
-            run(&line, at, name, &macros, 0, &mut text, &mut lines, &mut errors);
+        let mut map = Mapped::default();
+        for line in own {
+            let at = line.pieces.first().map_or(0, |(_, _, s, _)| s.line);
+            run(&line, at, name, &macros, None, &mut map, &mut errors);
         }
-        out.push(Expanded { name: name.clone(), text, lines, imported_by: *by, externals });
+        let lines = (1..=map.lines).map(|l| map.written_line(l).map_or(0, |s| s.line)).collect();
+        out.push(Expanded { name: name.clone(), text: map.text.clone(), lines, map, imported_by: *by, externals });
     }
     if errors.is_empty() { Ok(out) } else { Err(errors) }
 }
@@ -367,14 +378,13 @@ fn load_data(slk: &str, n: usize) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// `line` (the file's `at`), its `runtextmacro` run, into `text`.
-#[allow(clippy::too_many_arguments)]
-fn run(line: &str, at: usize, file: &str, macros: &HashMap<String, Macro>, depth: usize, text: &mut String, lines: &mut Vec<usize>, errors: &mut Vec<Error>) {
+/// `line` (the file's `at`: what errors are said at), its `runtextmacro`
+/// run, into `map`; `parent` the expansion it's in.
+fn run(line: &Line, at: usize, file: &str, macros: &HashMap<String, Macro>, parent: Option<usize>, map: &mut Mapped, errors: &mut Vec<Error>) {
     let error = |message: String| Error { origin: Origin { file: file.into(), line: at }, message };
-    let Some(rest) = directive(line).and_then(|d| d.strip_prefix("runtextmacro")).filter(|r| r.is_empty() || r.starts_with(char::is_whitespace)) else {
-        text.push_str(line);
-        text.push('\n');
-        lines.push(at);
+    let text = line.text.as_str();
+    let Some(rest) = directive(text).and_then(|d| d.strip_prefix("runtextmacro")).filter(|r| r.is_empty() || r.starts_with(char::is_whitespace)) else {
+        map.push_line(line);
         return;
     };
     let rest = rest.trim();
@@ -397,27 +407,44 @@ fn run(line: &str, at: usize, file: &str, macros: &HashMap<String, Macro>, depth
         }
         return;
     };
-    let args = match strings(args) {
+    let given = match strings(args) {
         Ok(a) => a,
         Err(e) => {
             errors.push(error(format!("`//! runtextmacro {name}`: {e}")));
             return;
         }
     };
-    if args.len() != m.params.len() {
-        errors.push(error(format!("textmacro {name} takes {} argument(s), given {}", m.params.len(), args.len())));
+    if given.len() != m.params.len() {
+        errors.push(error(format!("textmacro {name} takes {} argument(s), given {}", m.params.len(), given.len())));
         return;
     }
-    if depth >= DEPTH {
+    if map.chain(parent).len() >= DEPTH {
         errors.push(error(format!("textmacro {name} runs itself (or textmacros run each other) past {DEPTH} deep")));
         return;
     }
+    // Columns on `line`: the byte `b` of `text` is its character `col(b)`.
+    let col = |b: usize| text[..b].chars().count() + 1;
+    let args_at = text.len() - text[text.find('(').map_or(0, |p| p + 1)..].len();
+    let name_at = text.find(name).unwrap_or(0);
+    let used = line.origin(col(name_at)).map_or(Spelling::new(file, at, 1), |(s, _)| s);
+    let defined = Spelling::new(&m.origin.file, m.origin.line, 1);
+    let me = map.expansion(Expansion { name: name.to_string(), defined, used, parent });
+    // Each argument as written where it's given.
+    let args: Vec<Line> = given
+        .iter()
+        .map(|(a, start)| {
+            let from = col(args_at + start);
+            let mut l = Line::default();
+            l.push_part(line, from, from + a.chars().count());
+            l
+        })
+        .collect();
     for body in &m.body {
-        let mut l = body.clone();
-        for (p, a) in m.params.iter().zip(&args) {
-            l = l.replace(&format!("${p}$"), a);
+        let mut own = body.clone();
+        for p in &mut own.pieces {
+            p.3 = Some(me);
         }
-        run(&l, at, file, macros, depth + 1, text, lines, errors);
+        run(&own.substitute(&m.params, &args), at, file, macros, Some(me), map, errors);
     }
 }
 
