@@ -118,6 +118,13 @@ pub const DOVJASSINIT: &str = "wcb__dovjassinit";
 /// The files `files` (each a name and its text), their imports with them
 /// (after the file importing them), their macros run.
 pub fn expand(files: &[(&str, &str)], import: &Import) -> Result<Vec<Expanded>, Vec<Error>> {
+    let (out, errors) = expand_lenient(files, import);
+    if errors.is_empty() { Ok(out) } else { Err(errors) }
+}
+
+/// [`expand`] that goes on past what's wrong: what it could make, and
+/// what's wrong (the editor reads code being written through it).
+pub fn expand_lenient(files: &[(&str, &str)], import: &Import) -> (Vec<Expanded>, Vec<Error>) {
     let mut errors = Vec::new();
     let error = |file: &str, line: usize, message: String| Error { origin: Origin { file: file.into(), line }, message };
 
@@ -331,7 +338,7 @@ pub fn expand(files: &[(&str, &str)], import: &Import) -> Result<Vec<Expanded>, 
         let lines = (1..=map.lines).map(|l| map.written_line(l).map_or(0, |s| s.line)).collect();
         out.push(Expanded { name: name.clone(), text: map.text.clone(), lines, map, imported_by: *by, externals });
     }
-    if errors.is_empty() { Ok(out) } else { Err(errors) }
+    (out, errors)
 }
 
 /// What a `//! loaddata` is made: `wcb__loaddata_<n>`, run after vJASS's
