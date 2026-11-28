@@ -28,7 +28,7 @@ const ANON: &str = "wcb__anon_";
 
 /// Adds a Zinc program's items, from file `f`, to `m`.
 pub fn add(m: &mut Module, f: &Source, p: &z::Program, errors: &mut Vec<Error>) {
-    let lines: Vec<&str> = f.text.lines().collect();
+    let lines: Vec<&str> = parser_rs::lines::lines(&f.text).collect();
     let next_anon = m.functions.iter().filter(|g| g.sig.name.starts_with(ANON)).count();
     let mut r = Reader { file: f.name, lines: &lines, m, errors, next_anon, scope: None, grids: Default::default(), anon_methods: Vec::new() };
     // The arrays of several dimensions first: a function may use one

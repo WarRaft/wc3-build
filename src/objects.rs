@@ -138,7 +138,7 @@ impl Objects {
     /// section's `Orderon` and `Orderoff`.
     pub fn add_ability_func(&mut self, text: &str) {
         let mut current: Option<Rawcode> = None;
-        for line in text.lines() {
+        for line in parser_rs::lines::lines(&text) {
             let line = line.trim();
             if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
                 current = Rawcode::parse(name);

@@ -104,7 +104,7 @@ pub fn signatures(text: &str) -> Vec<Signature> {
 pub fn expr(text: &str) -> Result<Expr, String> {
     let src = format!("function F takes nothing returns nothing\n    return {text}\nendfunction\n");
     let p = jass_rs::parse(&src).map_err(|e| format!("{text:?}: {}", e.message))?;
-    let lines: Vec<&str> = src.lines().collect();
+    let lines: Vec<&str> = parser_rs::lines::lines(&src).collect();
     let r = Reader { lines: &lines, file: "" };
     match p.items.first() {
         Some(j::TopLevel::Function(f)) => match f.body.as_slice() {
@@ -116,7 +116,7 @@ pub fn expr(text: &str) -> Result<Expr, String> {
 }
 
 fn add(m: &mut Module, f: &Source, p: &j::Program, errors: &mut Vec<Error>) {
-    let lines: Vec<&str> = f.text.lines().collect();
+    let lines: Vec<&str> = parser_rs::lines::lines(&f.text).collect();
     let r = Reader { lines: &lines, file: f.name };
     r.items(m, f, &p.items, None, errors);
 }

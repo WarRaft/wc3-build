@@ -120,7 +120,7 @@ pub fn expand(files: &[(&str, &str)], import: &Import) -> Result<Vec<Expanded>, 
     let mut k = 0;
     while k < all.len() {
         let (name, text) = (all[k].0.clone(), all[k].1.clone());
-        for (i, line) in text.lines().enumerate() {
+        for (i, line) in parser_rs::lines::lines(&text).enumerate() {
             let Some(rest) = directive(line).and_then(|d| d.strip_prefix("import")).filter(|r| r.is_empty() || r.starts_with(char::is_whitespace)) else { continue };
             let rest = rest.trim();
             let (kind, path) = match rest.split_once(char::is_whitespace) {
@@ -158,7 +158,7 @@ pub fn expand(files: &[(&str, &str)], import: &Import) -> Result<Vec<Expanded>, 
         let mut tools = Vec::new();
         // An `//! inject` open: what it replaces, and its line.
         let mut injecting: Option<(String, usize)> = None;
-        let mut lines = text.lines().enumerate();
+        let mut lines = parser_rs::lines::lines(&text).enumerate();
         while let Some((i, line)) = lines.next() {
             let Some(d) = directive(line) else {
                 own.push((line.to_string(), i + 1));

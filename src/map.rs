@@ -58,7 +58,7 @@ const CELL: f32 = 128.0;
 fn sections(text: &str) -> HashMap<String, Vec<(String, String)>> {
     let mut out: HashMap<String, Vec<(String, String)>> = HashMap::new();
     let mut current = String::new();
-    for line in text.lines() {
+    for line in parser_rs::lines::lines(&text) {
         let line = line.trim();
         if line.is_empty() || line.starts_with("//") {
             continue;
